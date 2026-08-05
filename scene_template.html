@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; background: #0d0d0f; overflow: hidden; }
+  #stage { position: relative; width: 1920px; height: 1080px; }
+  #world { width: 100%; height: 100%; display: block; }
+  .hand-sprite { position: absolute; pointer-events: none; transform-origin: top left; }
+  .drawable-path { fill: none; stroke: #1a1a1a; stroke-width: 6; stroke-linecap: round; stroke-linejoin: round; }
+  .illustration-img { }
+  /* Fixed UI layer — deliberately OUTSIDE #world, never touched by camera moves */
+  #caption-layer { position: absolute; bottom: 40px; left: 0; right: 0; text-align: center;
+                   font-family: sans-serif; font-size: 42px; color: white;
+                   text-shadow: 0 2px 8px rgba(0,0,0,0.8); pointer-events: none; }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <svg id="world" viewBox="0 0 1920 1080" xmlns="http://www.w3.org/2000/svg">
+      <g id="content-layer"></g>
+    </svg>
+    <div id="hand-layer"></div>
+    <div id="caption-layer"></div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+  <script>
+  // ── Load scene program ──────────────────────────────────────────
+  const params = new URLSearchParams(window.location.search);
+  const scenePath = params.get('scene');
+
+  async function loadScene() {
+    const resp = await fetch(scenePath);
+    return resp.json();
+  }
+
+  const worldEl = document.getElementById('world');
+  const contentLayer = document.getElementById('content-layer');
+  const handLayer = document.getElementById('hand-layer');
+  const captionLayer = document.getElementById('caption-layer');
+
+  // ── Camera: drives the SVG viewBox directly, see camera.py for why ──
+  function buildCameraTimeline(keyframes) {
+    if (!keyframes || keyframes.length === 0) return;
+    const cam = { x: keyframes[0].x, y: keyframes[0].y, w: keyframes[0].w, h: keyframes[0].h };
+    const tl = gsap.timeline();
+    for (let i = 1; i < keyframes.length; i++) {
+      const kf = keyframes[i];
+      const prev = keyframes[i - 1];
+      tl.to(cam, {
+        x: kf.x, y: kf.y, w: kf.w, h: kf.h,
+        duration: kf.t - prev.t,
+        ease: kf.ease === 'none' ? 'none' : kf.ease,
+        onUpdate: () => {
+          worldEl.setAttribute('viewBox', `${cam.x} ${cam.y} ${cam.w} ${cam.h}`);
+        },
+      }, prev.t);
+    }
+    return tl;
+  }
+
+  // ── Stroke-reveal drawing (write/draw modes) ────────────────────
+  // Placeholder path generator: real text-to-SVG-path / icon-path
+  // loading happens here. For icons, fetch the resolved SVG's <path
+  // d="..."> directly. For write-mode text, a text-to-path library
+  // (e.g. opentype.js) converts each glyph — not wired up yet in this
+  // first pass; this function currently draws a simple placeholder
+  // rectangle-ish path so the reveal + hand-tracking mechanism can be
+  // verified end-to-end before glyph paths are wired in.
+  function placeholderPathFor(region) {
+    const { x, y, w, h } = region;
+    return `M ${x} ${y} L ${x + w} ${y} L ${x + w} ${y + h} L ${x} ${y + h} Z`;
+  }
+
+  function animateStrokeReveal(beat, onUpdateHand) {
+    const region = beat.region;
+    const d = placeholderPathFor(region);
+
+    const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    pathEl.setAttribute('d', d);
+    pathEl.setAttribute('class', 'drawable-path');
+    contentLayer.appendChild(pathEl);
+
+    const len = pathEl.getTotalLength();
+    pathEl.style.strokeDasharray = len;
+    pathEl.style.strokeDashoffset = len;
+
+    const duration = beat.end - beat.start;
+    gsap.to(pathEl.style, {
+      strokeDashoffset: 0,
+      duration,
+      ease: 'none',
+      onUpdate: function () {
+        const progress = this.progress();
+        const pt = pathEl.getPointAtLength(progress * len);
+        const nextPt = pathEl.getPointAtLength(Math.min(progress + 0.02, 1) * len);
+        const angle = Math.atan2(nextPt.y - pt.y, nextPt.x - pt.x) * 180 / Math.PI;
+        onUpdateHand(pt.x, pt.y, angle);
+      },
+    }, beat.start);
+  }
+
+  // ── Hand placement ───────────────────────────────────────────────
+  function placeHandSprite(file, x, y, w, h, rotation) {
+    let img = document.getElementById('active-hand');
+    if (!img) {
+      img = document.createElement('img');
+      img.id = 'active-hand';
+      img.className = 'hand-sprite';
+      handLayer.appendChild(img);
+    }
+    img.src = `assets/hands/${file}`;
+    img.style.left = `${x}px`;
+    img.style.top = `${y}px`;
+    img.style.width = `${w}px`;
+    img.style.height = `${h}px`;
+    img.style.transform = `rotate(${rotation}deg)`;
+  }
+
+  // ── Beat dispatch ─────────────────────────────────────────────────
+  function scheduleBeat(beat) {
+    if ((beat.mode === 'draw' || beat.mode === 'write') && beat.region && beat.hand) {
+      const h = beat.hand;
+      animateStrokeReveal(beat, (px, py, angle) => {
+        // px/py are the CURRENT point on the path in world-space —
+        // convert the write gesture's calibrated anchor offset so the
+        // pen tip (not the image corner) lands exactly on (px, py).
+        placeHandSprite(h.file, px - (h.anchorOffsetX || 0), py - (h.anchorOffsetY || 0), h.w, h.h, angle);
+      });
+    } else if (beat.mode === 'point' && beat.hand) {
+      gsap.set({}, {
+        delay: beat.start,
+        onComplete: () => placeHandSprite(beat.hand.file, beat.hand.x, beat.hand.y, beat.hand.w, beat.hand.h, 0),
+      });
+    } else if ((beat.mode === 'zoom_in' || beat.mode === 'zoom_out') && beat.hand_swap) {
+      const { start, end, swap_at } = beat.hand_swap;
+      gsap.set({}, { delay: start.x !== undefined ? beat.start : 0 });
+      gsap.delayedCall(beat.start, () =>
+        placeHandSprite(start.file, start.x, start.y, start.w, start.h, 0));
+      gsap.delayedCall(swap_at, () =>
+        placeHandSprite(end.file, end.x, end.y, end.w, end.h, 0));
+    }
+    // erase / swipe / talk dispatch follow the same delayedCall pattern — omitted in this
+    // first pass for brevity, mechanism is identical to the cases above.
+  }
+
+  // ── Boot ────────────────────────────────────────────────────────
+  loadScene().then((scene) => {
+    buildCameraTimeline(scene.camera_keyframes);
+    scene.beats.forEach(scheduleBeat);
+  });
+  </script>
+</body>
+</html>

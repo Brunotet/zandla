@@ -1,0 +1,8 @@
+requests
+Pillow
+numpy
+torch
+open_clip_torch
+cairosvg
+playwright
+fastapi[standard]
