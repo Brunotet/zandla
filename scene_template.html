@@ -61,26 +61,31 @@
   }
 
   // ── Stroke-reveal drawing (write/draw modes) ────────────────────
-  // Placeholder path generator: real text-to-SVG-path / icon-path
-  // loading happens here. For icons, fetch the resolved SVG's <path
-  // d="..."> directly. For write-mode text, a text-to-path library
-  // (e.g. opentype.js) converts each glyph — not wired up yet in this
-  // first pass; this function currently draws a simple placeholder
-  // rectangle-ish path so the reveal + hand-tracking mechanism can be
-  // verified end-to-end before glyph paths are wired in.
-  function placeholderPathFor(region) {
-    const { x, y, w, h } = region;
-    return `M ${x} ${y} L ${x + w} ${y} L ${x + w} ${y + h} L ${x} ${y + h} Z`;
-  }
-
+  // path_d comes pre-computed from Python — text_to_path.py (real
+  // glyph outlines, deterministic) for 'write' beats, svg_to_path.py
+  // (extracted + fitted icon paths) for 'draw' beats with
+  // draw_style='stroke_reveal'. Nothing generative happens here;
+  // this just reveals a path that already fully exists.
   function animateStrokeReveal(beat, onUpdateHand) {
-    const region = beat.region;
-    const d = placeholderPathFor(region);
+    if (!beat.path_d) {
+      console.warn(`beat ${beat.beat_id}: no path_d, skipping stroke reveal`);
+      return;
+    }
 
     const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    pathEl.setAttribute('d', d);
+    pathEl.setAttribute('d', beat.path_d);
     pathEl.setAttribute('class', 'drawable-path');
+    if (beat.path_transform) {
+      pathEl.setAttribute('transform', beat.path_transform);
+    }
     contentLayer.appendChild(pathEl);
+
+    // getTotalLength()/getPointAtLength() operate in the path's LOCAL
+    // coordinate space — if a transform is applied (icon case), the
+    // hand-tracking point needs the same transform applied to match
+    // world-space. write-mode paths have no transform (already baked
+    // into path_d by text_to_path.py), so this is a no-op for those.
+    const ctm = beat.path_transform ? pathEl.getCTM() : null;
 
     const len = pathEl.getTotalLength();
     pathEl.style.strokeDasharray = len;
@@ -93,8 +98,12 @@
       ease: 'none',
       onUpdate: function () {
         const progress = this.progress();
-        const pt = pathEl.getPointAtLength(progress * len);
-        const nextPt = pathEl.getPointAtLength(Math.min(progress + 0.02, 1) * len);
+        let pt = pathEl.getPointAtLength(progress * len);
+        let nextPt = pathEl.getPointAtLength(Math.min(progress + 0.02, 1) * len);
+        if (ctm) {
+          pt = pt.matrixTransform(ctm);
+          nextPt = nextPt.matrixTransform(ctm);
+        }
         const angle = Math.atan2(nextPt.y - pt.y, nextPt.x - pt.x) * 180 / Math.PI;
         onUpdateHand(pt.x, pt.y, angle);
       },
@@ -118,15 +127,51 @@
     img.style.transform = `rotate(${rotation}deg)`;
   }
 
+  // ── Illustration reveal (mask_wipe — no stroke path, CLIP-matched
+  // stock illustration instead. See asset_resolver.py fallback tier.) ──
+  function animateMaskWipe(beat) {
+    const region = beat.region;
+    const clipId = `clip-${beat.beat_id}`;
+    const clip = document.createElementNS('http://www.w3.org/2000/svg', 'clipPath');
+    clip.setAttribute('id', clipId);
+    const clipRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    clipRect.setAttribute('x', region.x);
+    clipRect.setAttribute('y', region.y);
+    clipRect.setAttribute('width', 0);
+    clipRect.setAttribute('height', region.h);
+    clip.appendChild(clipRect);
+    contentLayer.appendChild(clip);
+
+    const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+    img.setAttribute('x', region.x);
+    img.setAttribute('y', region.y);
+    img.setAttribute('width', region.w);
+    img.setAttribute('height', region.h);
+    img.setAttribute('href', beat.illustration_path);
+    img.setAttribute('clip-path', `url(#${clipId})`);
+    contentLayer.appendChild(img);
+
+    gsap.to(clipRect, {
+      attr: { width: region.w },
+      duration: beat.end - beat.start,
+      ease: 'power1.out',
+    }, beat.start);
+  }
+
   // ── Beat dispatch ─────────────────────────────────────────────────
   function scheduleBeat(beat) {
-    if ((beat.mode === 'draw' || beat.mode === 'write') && beat.region && beat.hand) {
-      const h = beat.hand;
+    if (beat.mode === 'draw' && beat.illustration_path) {
+      animateMaskWipe(beat);
+      return;
+    }
+    if ((beat.mode === 'draw' || beat.mode === 'write') && beat.region && beat.hand && beat.path_d) {
+      const h = beat.hand; // {file, anchor_x, anchor_y, w, h} — raw offset, no static target baked in
       animateStrokeReveal(beat, (px, py, angle) => {
-        // px/py are the CURRENT point on the path in world-space —
-        // convert the write gesture's calibrated anchor offset so the
-        // pen tip (not the image corner) lands exactly on (px, py).
-        placeHandSprite(h.file, px - (h.anchorOffsetX || 0), py - (h.anchorOffsetY || 0), h.w, h.h, angle);
+        // px/py are the CURRENT point on the path in world-space, recomputed
+        // every animation frame — subtract the calibrated anchor offset so
+        // the PEN TIP (not the image's top-left corner) tracks the live
+        // drawing point, not a single fixed position.
+        placeHandSprite(h.file, px - h.anchor_x, py - h.anchor_y, h.w, h.h, angle);
       });
     } else if (beat.mode === 'point' && beat.hand) {
       gsap.set({}, {

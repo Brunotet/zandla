@@ -24,6 +24,8 @@ from typing import List
 import voice_engine
 import asset_resolver
 import gesture_engine
+import text_to_path
+import svg_to_path
 from camera import Camera, CameraMove
 from beat_schema import validate_batch, load_vocabulary, GESTURE_FOR_MODE
 
@@ -154,16 +156,56 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
 
         region = board_layout.get(beat["beat_id"])
 
-        if beat["mode"] in ("draw", "write") and region:
+        if beat["mode"] == "write" and region:
+            # Text mode: real glyph paths, computed deterministically in
+            # Python (see text_to_path.py) — no font loading or generative
+            # step happens in the browser at render time.
+            pad = 0.15
+            usable_w = region["w"] * (1 - 2 * pad)
+            usable_h = region["h"] * (1 - 2 * pad)
+            font_size = text_to_path.fit_font_size(beat["text"], usable_w, usable_h)
+            path_info = text_to_path.text_to_path_d(
+                beat["text"],
+                x=region["x"] + region["w"] * pad,
+                y=region["y"] + region["h"] * pad,
+                font_size=font_size,
+            )
+            beat_out["path_d"] = path_info["d"]
+            beat_out["path_transform"] = None  # already baked into path_d, no wrapper transform needed
+            beat_out["region"] = region
+
+            # NOTE: hand tracks the LIVE point on the stroke-reveal path every
+            # frame, not a single static target — so we hand the template the
+            # raw anchor offset (gesture_engine.anchor_offset), not a
+            # pre-computed placement. The template subtracts this offset from
+            # the moving pen-tip point each frame. See scene_template.html.
+            beat_out["hand"] = gesture_engine.anchor_offset("write")
+
+            cam.add(CameraMove(action="zoom_in", region=region, duration=min(1.2, beat["end"] - beat["start"])),
+                    start_t=beat["start"])
+
+        elif beat["mode"] == "draw" and region:
             asset_entry = resolve_beat_asset(beat, channel, illustration_cache_dir)
             beat_out["asset"] = asset_entry
             beat_out["region"] = region
 
-            gesture_name = GESTURE_FOR_MODE.get(beat["mode"], "write")
-            target_x = region["x"] + region["w"] / 2
-            target_y = region["y"] + region["h"] / 2
-            placement = gesture_engine.place_write(target_x, target_y)
-            beat_out["hand"] = placement.to_dict()
+            if asset_entry.get("draw_style") == "stroke_reveal":
+                svg_path = asset_entry["asset_ref"].get("path")
+                icon_path_info = svg_to_path.icon_to_path_d(svg_path, region) if svg_path else None
+                if icon_path_info is None:
+                    raise RuntimeError(
+                        f"beat_id={beat['beat_id']}: concept_key resolved to an icon with no usable "
+                        f"<path> data (see svg_to_path.py LIMITATION) — pick a different icon for this "
+                        f"concept_key or extend svg_to_path.py to handle primitive shapes."
+                    )
+                beat_out["path_d"] = icon_path_info["d"]
+                beat_out["path_transform"] = icon_path_info["transform"]
+            else:
+                # mask_wipe illustration — no path data, template reveals via clip-path sweep instead.
+                beat_out["illustration_path"] = asset_entry["asset_ref"].get("cached_path")
+
+            if "path_d" in beat_out:
+                beat_out["hand"] = gesture_engine.anchor_offset("write")
 
             cam.add(CameraMove(action="zoom_in", region=region, duration=min(1.2, beat["end"] - beat["start"])),
                     start_t=beat["start"])

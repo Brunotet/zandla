@@ -55,6 +55,19 @@ def _placement_for_point_gesture(gesture_name: str, target_x: float, target_y: f
     )
 
 
+def anchor_offset(gesture_name: str) -> dict:
+    """Raw anchor offset + native size for a 'point'-type gesture,
+    with NO target baked in — used when the target point changes every
+    frame (write/draw stroke-reveal tracking), where render_pipeline.py
+    can't pre-compute a single placement because there isn't a single
+    target, there's a moving one the browser resolves per-frame."""
+    g = GESTURES[gesture_name]
+    if g["type"] != "point":
+        raise ValueError(f"gesture '{gesture_name}' is type '{g['type']}', not 'point'")
+    w, h = g["native_size"]
+    return {"file": g["file"], "anchor_x": g["anchor"]["x"], "anchor_y": g["anchor"]["y"], "w": w, "h": h}
+
+
 def place_write(target_x: float, target_y: float, path_angle_deg: float = 0.0) -> HandPlacement:
     """target = current point on the stroke-reveal path (see
     camera/render's getPointAtLength equivalent). path_angle_deg =
