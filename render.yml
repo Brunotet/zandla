@@ -1,0 +1,70 @@
+name: Render Hand-Draw Video
+
+# Same trigger-and-callback shape as the existing tongue-twisters
+# pipeline: n8n dispatches this via workflow_dispatch with the script +
+# beats as inputs, this workflow renders, uploads to R2 via a
+# presigned URL (SigV4), then resumes n8n's waiting execution via
+# $execution.resumeUrl. Nothing about that architecture changes here —
+# only the render step's internals differ (this repo's render_pipeline.py
+# instead of the What's The Difference / Tongue Twisters one).
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Which channel's concept-library.json + voice to use"
+        required: true
+        type: string
+      script_json:
+        description: "JSON payload: {script_text, beats, voice, resume_url, presigned_put_url}"
+        required: true
+        type: string
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt --break-system-packages
+          playwright install --with-deps chromium
+
+      - name: Parse dispatch payload
+        id: payload
+        run: |
+          echo '${{ inputs.script_json }}' > /tmp/payload.json
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/payload.json'))
+          assert 'script_text' in d and 'beats' in d, 'payload missing script_text or beats'
+          print('ok')
+          "
+
+      - name: Build scene program + render
+        env:
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          MODAL_TTS_URL: ${{ secrets.MODAL_TTS_URL }}
+        run: |
+          python3 tools/run_render.py \
+            --channel "${{ inputs.channel }}" \
+            --payload /tmp/payload.json \
+            --out /tmp/output.mp4
+
+      - name: Upload to R2 (presigned PUT, SigV4)
+        run: |
+          python3 tools/upload_r2.py \
+            --file /tmp/output.mp4 \
+            --payload /tmp/payload.json
+
+      - name: Resume n8n execution
+        run: |
+          python3 tools/resume_n8n.py --payload /tmp/payload.json
