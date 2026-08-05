@@ -1,0 +1,6 @@
+{
+  "_meta": {
+    "description": "Concept keys specific to (or overriding) the psychology channel. Checked after channels/_shared/concept-library.json. New concept_keys get auto-appended here at render time when asset_resolver.resolve() finds something live — review periodically and promote genuinely cross-channel concepts up into _shared/concept-library.json.",
+    "schema_version": 1
+  }
+}

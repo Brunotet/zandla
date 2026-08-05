@@ -1,0 +1,95 @@
+{
+  "_meta": {
+    "description": "Anchor points are calibrated in the ORIGINAL PNG's own pixel space (top-left origin), not world-space. At render time, the renderer computes the offset between a gesture's anchor and the target world-space point, then positions the whole image by that offset. Native image size for all current assets: 1408x768 (update per-asset if you add differently-sized PNGs later — the 'native_size' field is authoritative, not this comment).",
+    "coordinate_origin": "top-left",
+    "calibration_method": "visual grid overlay, see tools/calibrate_hands.py"
+  },
+
+  "write": {
+    "file": "write.png",
+    "native_size": [1408, 768],
+    "type": "point",
+    "anchor": {"x": 655, "y": 133},
+    "anchor_label": "pen tip",
+    "notes": "Anchor = tip of the marker. Whatever is being written/drawn should start exactly here at the beginning of the stroke reveal."
+  },
+
+  "point": {
+    "file": "point.png",
+    "native_size": [1408, 768],
+    "type": "point",
+    "anchor": {"x": 798, "y": 65},
+    "anchor_label": "index fingertip",
+    "notes": "Anchor lands directly on the existing text/icon being called out."
+  },
+
+  "pinch_in": {
+    "file": "pinch-in.png",
+    "native_size": [1408, 768],
+    "type": "point",
+    "anchor": {"x": 700, "y": 145},
+    "anchor_label": "pinch contact point",
+    "pair": "pinch_out",
+    "pair_role": "start",
+    "notes": "Fingers closed together — this is frame 1 of the zoom-IN 2-frame swap (small -> about to expand). Also frame 2 of the zoom-OUT swap (spread -> just closed)."
+  },
+
+  "pinch_out": {
+    "file": "pinch-out.png",
+    "native_size": [1408, 768],
+    "type": "point",
+    "anchor": {"x": 900, "y": 180},
+    "anchor_label": "spread contact point (gap between extended fingers)",
+    "pair": "pinch_in",
+    "pair_role": "end",
+    "notes": "Fingers spread apart — frame 2 of zoom-IN swap (icon now enlarged). Also frame 1 of zoom-OUT swap. NOTE: anchor coordinate approximate — verify against target icon alignment on first render test and nudge by a few px if the 'grab point' doesn't read as continuous with pinch_in."
+  },
+
+  "drag": {
+    "file": "drag.png",
+    "native_size": [1408, 768],
+    "type": "point",
+    "anchor": {"x": 520, "y": 197},
+    "anchor_label": "index fingertip (grab point)",
+    "notes": "Anchor tracks whatever element is being dragged — element position = anchor position every frame of the drag tween."
+  },
+
+  "erase": {
+    "file": "erase.png",
+    "native_size": [1408, 768],
+    "type": "area",
+    "zone": {"x": 650, "y": 120, "w": 350, "h": 190},
+    "zone_label": "knuckle/back-of-fingers contact edge",
+    "notes": "Fist-like pose, contact edge is the knuckle ridge along the top of the curled fingers. Zone sweeps back and forth over the region being erased (drawn stroke fades out under the swept area) rather than a single tracked point."
+  },
+
+  "swipe": {
+    "file": "swipe.png",
+    "native_size": [1408, 768],
+    "type": "sweep",
+    "anchor": {"x": 925, "y": 145},
+    "anchor_label": "leading edge (extended fingertips)",
+    "notes": "Two-finger flat sweep, leading edge is the fingertip pair. Used for full-canvas clear/scene transitions: hand sweeps across the entire visible frame from one side to the other, canvas content behind it clears as it passes. Direction (L->R vs R->L) is a per-beat render choice (mirror the sprite horizontally for the reverse direction), not fixed to the asset."
+  },
+
+  "talk": {
+    "file": "talk.png",
+    "native_size": [1408, 768],
+    "type": "cutaway",
+    "notes": "No canvas anchor — reaction/explaining shot, positioned by its own layout rules (e.g. corner or full-frame), not tied to a world-space point."
+  },
+
+  "talk2": {
+    "file": "talk2.png",
+    "native_size": [1408, 768],
+    "type": "cutaway",
+    "notes": "Variant of talk, alternate pose for visual variety across consecutive talk-mode beats."
+  },
+
+  "shrug": {
+    "file": "shrug.png",
+    "native_size": [1408, 768],
+    "type": "cutaway",
+    "notes": "No canvas anchor — used for uncertain/open-question narration beats."
+  }
+}

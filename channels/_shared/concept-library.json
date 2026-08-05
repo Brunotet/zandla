@@ -1,0 +1,47 @@
+{
+  "_meta": {
+    "description": "Curated concept_key -> asset mappings shared across ALL channels. Checked BEFORE any channel-specific library and BEFORE any live asset_resolver.resolve() call. A concept_key found here never triggers a network search. Populate bottom-up from real script output (see render_pipeline.py auto-append behavior), not guessed in advance.",
+    "schema_version": 1
+  },
+
+  "brain": {
+    "channel_tags": ["psychology", "science", "general"],
+    "mode": "draw",
+    "asset_source": "icon",
+    "asset_ref": { "library": "tabler", "path": "vendor/icons/tabler/brain.svg" },
+    "draw_style": "stroke_reveal"
+  },
+
+  "arrow_up": {
+    "channel_tags": ["general"],
+    "mode": "draw",
+    "asset_source": "icon",
+    "asset_ref": { "library": "tabler", "path": "vendor/icons/tabler/arrow-up.svg" },
+    "draw_style": "stroke_reveal"
+  },
+
+  "checkmark": {
+    "channel_tags": ["general"],
+    "mode": "draw",
+    "asset_source": "icon",
+    "asset_ref": { "library": "tabler", "path": "vendor/icons/tabler/check.svg" },
+    "draw_style": "stroke_reveal"
+  },
+
+  "money": {
+    "channel_tags": ["general", "finance"],
+    "mode": "draw",
+    "asset_source": "icon",
+    "asset_ref": { "library": "phosphor", "path": "vendor/icons/phosphor/currency-circle-dollar.svg" },
+    "draw_style": "stroke_reveal"
+  },
+
+  "ancient_rome": {
+    "channel_tags": ["history"],
+    "mode": "draw",
+    "asset_source": "pixabay_illustration",
+    "asset_ref": { "cached_path": "channels/history/illustration-cache/ancient_rome.png" },
+    "draw_style": "mask_wipe",
+    "note": "No clean single-icon match for this concept — resolved via CLIP-ranked illustration search and cached on first render, per asset_resolver.py's fallback tier."
+  }
+}
