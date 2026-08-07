@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <style>
-  html, body { margin: 0; padding: 0; background: #0d0d0f; overflow: hidden; }
+  html, body { margin: 0; padding: 0; background: #f7f4ed; overflow: hidden; }
   #stage { position: relative; width: 1920px; height: 1080px; }
   #world { width: 100%; height: 100%; display: block; }
   .hand-sprite { position: absolute; pointer-events: none; transform-origin: top left; }
@@ -11,8 +11,10 @@
   .illustration-img { }
   /* Fixed UI layer — deliberately OUTSIDE #world, never touched by camera moves */
   #caption-layer { position: absolute; bottom: 40px; left: 0; right: 0; text-align: center;
-                   font-family: sans-serif; font-size: 42px; color: white;
-                   text-shadow: 0 2px 8px rgba(0,0,0,0.8); pointer-events: none; }
+                   font-family: sans-serif; font-size: 42px; color: #1a1a1a; font-weight: 600;
+                   text-shadow: -2px -2px 0 #fff, 2px -2px 0 #fff, -2px 2px 0 #fff, 2px 2px 0 #fff,
+                                0 0 12px rgba(255,255,255,0.9);
+                   pointer-events: none; }
 </style>
 </head>
 <body>
@@ -24,13 +26,23 @@
     <div id="caption-layer"></div>
   </div>
 
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+  <script src="vendor/js/gsap.min.js"></script>
   <script>
   // ── Load scene program ──────────────────────────────────────────
-  const params = new URLSearchParams(window.location.search);
-  const scenePath = params.get('scene');
-
+  // Scene data is injected directly as window.__SCENE_DATA__ (see
+  // tools/run_render.py's page.add_init_script) rather than fetched —
+  // fetching a file:// path from a file:// page hits Chromium's
+  // cross-directory file-access sandboxing and fails silently, which
+  // is exactly what caused the first real test render to produce a
+  // blank canvas (audio-only output). Falls back to the old fetch
+  // path only for convenience when manually testing this file via a
+  // real HTTP server (python3 -m http.server) with ?scene=<url>.
   async function loadScene() {
+    if (window.__SCENE_DATA__) {
+      return window.__SCENE_DATA__;
+    }
+    const params = new URLSearchParams(window.location.search);
+    const scenePath = params.get('scene');
     const resp = await fetch(scenePath);
     return resp.json();
   }
@@ -192,8 +204,14 @@
 
   // ── Boot ────────────────────────────────────────────────────────
   loadScene().then((scene) => {
+    console.log(`scene loaded: ${scene.beats.length} beats`);
     buildCameraTimeline(scene.camera_keyframes);
     scene.beats.forEach(scheduleBeat);
+  }).catch((err) => {
+    // Loud, not silent — this exact failure mode (fetch of a file://
+    // path failing silently) is what produced a blank first render.
+    console.error('FATAL: scene failed to load:', err);
+    document.body.innerHTML = `<div style="color:red;font-size:40px;padding:40px;">SCENE LOAD FAILED: ${err}</div>`;
   });
   </script>
 </body>
