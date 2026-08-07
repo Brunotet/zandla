@@ -7,7 +7,8 @@
   #stage { position: relative; width: 1920px; height: 1080px; }
   #world { width: 100%; height: 100%; display: block; }
   .hand-sprite { position: absolute; pointer-events: none; transform-origin: top left; }
-  .drawable-path { fill: none; stroke: #1a1a1a; stroke-width: 6; stroke-linecap: round; stroke-linejoin: round; }
+  .drawable-path { fill: none; stroke: #1a1a1a; stroke-width: 6; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+  .text-fill-path { fill: #1a1a1a; stroke: none; }
   .illustration-img { }
   /* Fixed UI layer — deliberately OUTSIDE #world, never touched by camera moves */
   #caption-layer { position: absolute; bottom: 40px; left: 0; right: 0; text-align: center;
@@ -107,6 +108,7 @@
     gsap.to(pathEl.style, {
       strokeDashoffset: 0,
       duration,
+      delay: beat.start,
       ease: 'none',
       onUpdate: function () {
         const progress = this.progress();
@@ -119,7 +121,60 @@
         const angle = Math.atan2(nextPt.y - pt.y, nextPt.x - pt.x) * 180 / Math.PI;
         onUpdateHand(pt.x, pt.y, angle);
       },
-    }, beat.start);
+    });
+  }
+
+  // ── Text reveal (write mode) ─────────────────────────────────────
+  // Font glyphs are FILLED shapes, not single-stroke lines — tracing
+  // their outline with a thick stroke (the old approach) nearly merges
+  // into a solid blob, and a sentence's glyph path has many
+  // disconnected pieces (every letter, every hole like the inside of
+  // an "o" or "e"), so stroke-reveal follows path DATA order, not
+  // left-to-right, which is what made the hand look like it was
+  // jumping around randomly. Filling the real letterforms (correct —
+  // that's what makes the handwriting font look right) and revealing
+  // via a left-to-right wipe fixes both problems: readable text, and
+  // hand tracking a smooth linear sweep instead of erratic path order.
+  function animateTextReveal(beat, onUpdateHand) {
+    if (!beat.path_d || !beat.region) {
+      console.warn(`beat ${beat.beat_id}: no path_d/region, skipping text reveal`);
+      return;
+    }
+    const region = beat.region;
+
+    const clipId = `text-clip-${beat.beat_id}`;
+    const clip = document.createElementNS('http://www.w3.org/2000/svg', 'clipPath');
+    clip.setAttribute('id', clipId);
+    const clipRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    clipRect.setAttribute('x', region.x);
+    clipRect.setAttribute('y', region.y);
+    clipRect.setAttribute('width', 0);
+    clipRect.setAttribute('height', region.h);
+    clip.appendChild(clipRect);
+    contentLayer.appendChild(clip);
+
+    const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    pathEl.setAttribute('d', beat.path_d);
+    pathEl.setAttribute('class', 'text-fill-path');
+    pathEl.setAttribute('clip-path', `url(#${clipId})`);
+    contentLayer.appendChild(pathEl);
+
+    const duration = beat.end - beat.start;
+    const startX = region.x;
+    const endX = region.x + region.w;
+    const trackY = region.y + region.h / 2;
+
+    gsap.to(clipRect, {
+      attr: { width: region.w },
+      duration,
+      delay: beat.start,
+      ease: 'none',
+      onUpdate: function () {
+        const progress = this.progress();
+        const x = startX + (endX - startX) * progress;
+        onUpdateHand(x, trackY, 0);
+      },
+    });
   }
 
   // ── Hand placement ───────────────────────────────────────────────
@@ -166,8 +221,9 @@
     gsap.to(clipRect, {
       attr: { width: region.w },
       duration: beat.end - beat.start,
+      delay: beat.start,
       ease: 'power1.out',
-    }, beat.start);
+    });
   }
 
   // ── Beat dispatch ─────────────────────────────────────────────────
@@ -176,13 +232,18 @@
       animateMaskWipe(beat);
       return;
     }
-    if ((beat.mode === 'draw' || beat.mode === 'write') && beat.region && beat.hand && beat.path_d) {
-      const h = beat.hand; // {file, anchor_x, anchor_y, w, h} — raw offset, no static target baked in
+    if (beat.mode === 'write' && beat.region && beat.hand && beat.path_d) {
+      // Text: filled glyph shapes revealed via left-to-right wipe (see
+      // animateTextReveal docstring for why this replaced stroke-reveal).
+      const h = beat.hand;
+      animateTextReveal(beat, (px, py, angle) => {
+        placeHandSprite(h.file, px - h.anchor_x, py - h.anchor_y, h.w, h.h, angle);
+      });
+    } else if (beat.mode === 'draw' && beat.region && beat.hand && beat.path_d) {
+      // Icons: real single/multi-stroke line paths, stroke-reveal is the
+      // correct technique here (unlike text).
+      const h = beat.hand;
       animateStrokeReveal(beat, (px, py, angle) => {
-        // px/py are the CURRENT point on the path in world-space, recomputed
-        // every animation frame — subtract the calibrated anchor offset so
-        // the PEN TIP (not the image's top-left corner) tracks the live
-        // drawing point, not a single fixed position.
         placeHandSprite(h.file, px - h.anchor_x, py - h.anchor_y, h.w, h.h, angle);
       });
     } else if (beat.mode === 'point' && beat.hand) {
