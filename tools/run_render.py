@@ -58,7 +58,10 @@ def _capture_with_playwright(scene_path: str, duration: float, out_path: str):
     from playwright.sync_api import sync_playwright
 
     template_path = os.path.join(os.path.dirname(__file__), "..", "scene_template.html")
-    template_url = f"file://{os.path.abspath(template_path)}?scene={scene_path}"
+    template_url = f"file://{os.path.abspath(template_path)}"
+
+    with open(scene_path) as f:
+        scene_json_str = f.read()
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -68,6 +71,23 @@ def _capture_with_playwright(scene_path: str, duration: float, out_path: str):
             record_video_size={"width": 1920, "height": 1080},
         )
         page = context.new_page()
+
+        # Surface browser-side console/errors in the GitHub Actions log —
+        # a silently-failing fetch() is exactly what produced a blank
+        # first render with no indication anything was wrong. Never
+        # again: any future JS error is now loud in the workflow log.
+        page.on("console", lambda msg: print(f"[browser:{msg.type}] {msg.text}"))
+        page.on("pageerror", lambda exc: print(f"[browser:pageerror] {exc}"))
+
+        # Inject the scene data directly as a page global BEFORE
+        # navigation, rather than having the page fetch() it — fetching
+        # a file:// path from a file:// page hits Chromium's
+        # cross-directory file-access sandboxing and fails silently.
+        # add_init_script runs before any of the page's own scripts on
+        # every navigation, so window.__SCENE_DATA__ is guaranteed to
+        # already exist when scene_template.html's boot code runs.
+        page.add_init_script(f"window.__SCENE_DATA__ = {scene_json_str};")
+
         page.goto(template_url)
         page.wait_for_timeout(int((duration + 1) * 1000))
         context.close()
