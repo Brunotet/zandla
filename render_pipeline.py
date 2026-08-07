@@ -174,6 +174,32 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             beat_out["path_transform"] = None  # already baked into path_d, no wrapper transform needed
             beat_out["region"] = region
 
+            # Real per-word Chatterbox timestamps drive reveal pace —
+            # NOT a uniform slide across the whole sentence. Slice the
+            # global word list to this beat's time window, then zip
+            # positionally against text_to_path's word_boundaries (same
+            # word count expected since beat.text is a straight slice
+            # of the full script). If counts don't match — e.g. a
+            # tokenization mismatch between Chatterbox's words and a
+            # plain whitespace split — fall back to a uniform reveal
+            # rather than producing garbled/misaligned keyframes; this
+            # is logged, not silent, so a mismatch is visible in the
+            # render log instead of just looking subtly wrong.
+            global_words = timing["words"]
+            beat_words = [w for w in global_words if beat["start"] - 0.05 <= w["start"] < beat["end"] + 0.05]
+            word_boundaries = path_info["word_boundaries"]
+
+            if len(beat_words) == len(word_boundaries) and len(beat_words) > 0:
+                beat_out["reveal_keyframes"] = [
+                    {"t": max(0.0, gw["start"] - beat["start"]), "x_end": wb["x_end"]}
+                    for gw, wb in zip(beat_words, word_boundaries)
+                ]
+            else:
+                print(f"[render_pipeline] beat_id={beat['beat_id']}: word count mismatch "
+                      f"(chatterbox={len(beat_words)}, text_to_path={len(word_boundaries)}) "
+                      f"— falling back to uniform-speed reveal for this beat")
+                beat_out["reveal_keyframes"] = None
+
             # NOTE: hand tracks the LIVE point on the stroke-reveal path every
             # frame, not a single static target — so we hand the template the
             # raw anchor offset (gesture_engine.anchor_offset), not a
@@ -188,6 +214,9 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             asset_entry = resolve_beat_asset(beat, channel, illustration_cache_dir)
             beat_out["asset"] = asset_entry
             beat_out["region"] = region
+            print(f"[render_pipeline] beat_id={beat['beat_id']} concept_key={beat.get('concept_key')!r} "
+                  f"-> resolved: source={asset_entry.get('asset_source')} "
+                  f"ref={asset_entry.get('asset_ref')} draw_style={asset_entry.get('draw_style')}")
 
             if asset_entry.get("draw_style") == "stroke_reveal":
                 svg_path = asset_entry["asset_ref"].get("path")

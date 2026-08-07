@@ -84,7 +84,15 @@ def fit_font_size(text: str, max_width: float, max_height: float,
 
 
 def text_to_path_d(text: str, x: float, y: float, font_size: float) -> dict:
-    """Returns {"d": "<svg path d string>", "width": total_px_width}.
+    """Returns {"d": "<svg path d string>", "width": total_px_width,
+    "word_boundaries": [{"word": str, "x_start": float, "x_end": float}, ...]}.
+
+    word_boundaries is what makes the reveal animation match REAL
+    speech pace instead of a uniform slide — render_pipeline.py zips
+    this against Chatterbox's actual per-word timestamps so the reveal
+    hits each word's x-position at the moment it's actually spoken,
+    not at a fixed fraction of total duration.
+
     (x, y) is the TOP-LEFT of the text's bounding box in world-space —
     the function handles baseline math internally so callers don't
     need to think about font ascent/descent.
@@ -104,6 +112,9 @@ def text_to_path_d(text: str, x: float, y: float, font_size: float) -> dict:
 
     d_parts = []
     cursor_x = x
+    word_boundaries = []
+    current_word = ""
+    current_word_start_x = x
 
     for ch in text:
         gname = _glyph_name_for_char(f["cmap"], ch)
@@ -112,21 +123,36 @@ def text_to_path_d(text: str, x: float, y: float, font_size: float) -> dict:
         except KeyError:
             aw = f["units_per_em"] * 0.5
 
-        if ch != " ":
-            transform = Transform(scale, 0, 0, -scale, cursor_x, baseline_y)
-            svg_pen = SVGPathPen(f["glyph_set"])
-            t_pen = TransformPen(svg_pen, transform)
-            try:
-                f["glyph_set"][gname].draw(t_pen)
-                glyph_d = svg_pen.getCommands()
-                if glyph_d:
-                    d_parts.append(glyph_d)
-            except Exception as e:
-                print(f"[text_to_path] failed to draw glyph for '{ch}': {e}")
+        if ch == " ":
+            if current_word:
+                word_boundaries.append({
+                    "word": current_word, "x_start": current_word_start_x, "x_end": cursor_x,
+                })
+                current_word = ""
+            cursor_x += aw * scale
+            current_word_start_x = cursor_x
+            continue
+
+        current_word += ch
+        transform = Transform(scale, 0, 0, -scale, cursor_x, baseline_y)
+        svg_pen = SVGPathPen(f["glyph_set"])
+        t_pen = TransformPen(svg_pen, transform)
+        try:
+            f["glyph_set"][gname].draw(t_pen)
+            glyph_d = svg_pen.getCommands()
+            if glyph_d:
+                d_parts.append(glyph_d)
+        except Exception as e:
+            print(f"[text_to_path] failed to draw glyph for '{ch}': {e}")
 
         cursor_x += aw * scale
 
-    return {"d": " ".join(d_parts), "width": cursor_x - x}
+    if current_word:
+        word_boundaries.append({
+            "word": current_word, "x_start": current_word_start_x, "x_end": cursor_x,
+        })
+
+    return {"d": " ".join(d_parts), "width": cursor_x - x, "word_boundaries": word_boundaries}
 
 
 if __name__ == "__main__":
@@ -134,3 +160,5 @@ if __name__ == "__main__":
     result = text_to_path_d("the brain rewires itself", x=100, y=100, font_size=size)
     print(f"font_size={size:.1f}, width={result['width']:.1f}px")
     print(f"path d (first 200 chars): {result['d'][:200]}...")
+    print(f"word boundaries: {result['word_boundaries']}")
+
