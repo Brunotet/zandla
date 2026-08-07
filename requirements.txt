@@ -4,5 +4,6 @@ numpy
 torch
 open_clip_torch
 cairosvg
+fonttools
 playwright
 fastapi[standard]
