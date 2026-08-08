@@ -141,9 +141,34 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
 
     board_layout = _layout_board(timed_beats)
 
-    cam = Camera()
+    # Start the camera ALREADY FRAMED on the first beat's region rather
+    # than the full board — a slow zoom-in ramp from a wide default view
+    # meant text/icons looked tiny for the first ~1s of every render,
+    # which read as broken rather than as an intentional establishing
+    # shot. If the first beat has no region (e.g. starts with a talk
+    # cutaway), the default wide view is still the right fallback.
+    first_region = None
+    for b in timed_beats:
+        r = board_layout.get(b["beat_id"])
+        if r:
+            from camera import region_for_bbox, _fit_aspect
+            first_region = _fit_aspect(region_for_bbox(r, padding=60))
+            break
+
+    cam = Camera(start_view=first_region)
     t_cursor = 0.0
     scene_beats = []
+
+    # Maps concept_key -> the region it was drawn in, populated as we
+    # process draw/write beats in order. point/zoom_in/zoom_out beats
+    # don't get their own board slot (they reference something ALREADY
+    # drawn, not new content) — this is what they look their target
+    # region up from. A point/zoom beat whose concept_key was never
+    # drawn earlier in the script has nothing to point at — that's a
+    # script-authoring problem (Gemini referenced a concept before
+    # introducing it), surfaced as a loud error below, not silently
+    # producing an empty beat like it did before this fix.
+    concept_regions = {}
 
     for beat in timed_beats:
         beat_out = {
@@ -155,6 +180,18 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
         }
 
         region = board_layout.get(beat["beat_id"])
+        if region and beat.get("concept_key"):
+            concept_regions[beat["concept_key"]] = region
+        if region is None and beat["mode"] in ("point", "zoom_in", "zoom_out"):
+            ck = beat.get("concept_key")
+            region = concept_regions.get(ck)
+            if region is None:
+                raise RuntimeError(
+                    f"beat_id={beat['beat_id']} mode='{beat['mode']}' references concept_key="
+                    f"{ck!r}, but nothing with that concept_key was drawn earlier in this script "
+                    f"— {beat['mode']} needs an existing element to reference. Check the script's "
+                    f"beat order, or that the concept_key matches exactly."
+                )
 
         if beat["mode"] == "write" and region:
             # Text mode: real glyph paths, computed deterministically in
@@ -173,6 +210,13 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             beat_out["path_d"] = path_info["d"]
             beat_out["path_transform"] = None  # already baked into path_d, no wrapper transform needed
             beat_out["region"] = region
+            # Actual vertical center of the drawn text, NOT the region's
+            # center — the region has padding above/below the text, so
+            # tracking region.h/2 put the hand floating well below the
+            # letters. ~0.35*font_size approximates the visual mid-height
+            # of lowercase-heavy text (between baseline and x-height/ascender).
+            text_top_y = region["y"] + region["h"] * pad
+            beat_out["text_track_y"] = text_top_y + font_size * 0.35
 
             # Real per-word Chatterbox timestamps drive reveal pace —
             # NOT a uniform slide across the whole sentence. Slice the
@@ -202,10 +246,14 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
 
             # NOTE: hand tracks the LIVE point on the stroke-reveal path every
             # frame, not a single static target — so we hand the template the
-            # raw anchor offset (gesture_engine.anchor_offset), not a
-            # pre-computed placement. The template subtracts this offset from
-            # the moving pen-tip point each frame. See scene_template.html.
-            beat_out["hand"] = gesture_engine.anchor_offset("write")
+            # fully-resolved (already-scaled) hand data, not a pre-computed
+            # placement. The template subtracts anchor_x/anchor_y from the
+            # moving pen-tip point each frame. See scene_template.html.
+            # target_height proportional to font_size — a real hand holding a
+            # pen reads naturally at roughly 2.4x the text height; not a fixed
+            # constant, so it stays right-sized whether the region is huge or tiny.
+            target_height = font_size * 2.4
+            beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
             cam.add(CameraMove(action="zoom_in", region=region, duration=min(1.2, beat["end"] - beat["start"])),
                     start_t=beat["start"])
@@ -234,7 +282,11 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 beat_out["illustration_path"] = asset_entry["asset_ref"].get("cached_path")
 
             if "path_d" in beat_out:
-                beat_out["hand"] = gesture_engine.anchor_offset("write")
+                # target_height proportional to region size for icons — a hand
+                # tracing a small icon should be noticeably smaller than one
+                # writing a full sentence, not a fixed constant either way.
+                target_height = region["h"] * 0.5
+                beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
             cam.add(CameraMove(action="zoom_in", region=region, duration=min(1.2, beat["end"] - beat["start"])),
                     start_t=beat["start"])
@@ -242,27 +294,33 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
         elif beat["mode"] == "point" and region:
             target_x = region["x"] + region["w"] / 2
             target_y = region["y"] + region["h"] / 2
-            placement = gesture_engine.place_point(target_x, target_y)
-            beat_out["hand"] = placement.to_dict()
+            hand = gesture_engine.scaled_hand("point", target_height=region["h"] * 0.45)
+            beat_out["hand"] = hand.placement_at(target_x, target_y)
             beat_out["region"] = region
 
         elif beat["mode"] in ("zoom_in", "zoom_out") and region:
             direction = "in" if beat["mode"] == "zoom_in" else "out"
             target_x = region["x"] + region["w"] / 2
             target_y = region["y"] + region["h"] / 2
-            start_p, end_p = gesture_engine.zoom_swap_pair(target_x, target_y, direction=direction)
-            beat_out["hand_swap"] = {"start": start_p.to_dict(), "end": end_p.to_dict(),
-                                      "swap_at": (beat["start"] + beat["end"]) / 2}
+            th = region["h"] * 0.5
+            start_hand, end_hand = gesture_engine.zoom_swap_pair(direction=direction, target_height=th)
+            beat_out["hand_swap"] = {
+                "start": start_hand.placement_at(target_x, target_y),
+                "end": end_hand.placement_at(target_x, target_y),
+                "swap_at": (beat["start"] + beat["end"]) / 2,
+            }
             beat_out["region"] = region
             cam.add(CameraMove(action=beat["mode"], region=region,
                                 duration=min(1.0, beat["end"] - beat["start"])),
                     start_t=beat["start"])
 
         elif beat["mode"] == "swipe":
-            beat_out["hand_sweep"] = gesture_engine.place_swipe(
+            sweep = gesture_engine.scaled_swipe(
                 direction=beat.get("swipe_direction", "ltr"),
-                frame_width=1920, frame_height=1080, y_center=540,
+                frame_width=1920, target_height=280,
             )
+            sweep["y"] = 540 - sweep["anchor_y"]
+            beat_out["hand_sweep"] = sweep
             cam.add(CameraMove(action="zoom_out", duration=0.6), start_t=beat["start"])
 
         elif beat["mode"] == "talk":
