@@ -117,13 +117,14 @@
       onUpdate: function () {
         const progress = this.progress();
         let pt = pathEl.getPointAtLength(progress * len);
-        let nextPt = pathEl.getPointAtLength(Math.min(progress + 0.02, 1) * len);
         if (ctm) {
           pt = pt.matrixTransform(ctm);
-          nextPt = nextPt.matrixTransform(ctm);
         }
-        const angle = Math.atan2(nextPt.y - pt.y, nextPt.x - pt.x) * 180 / Math.PI;
-        onUpdateHand(pt.x, pt.y, angle);
+        // No rotation — hand stays upright regardless of path curvature.
+        // Tracking the tangent angle (old approach) made the hand visibly
+        // spin around curvy icon paths, which reads as unnatural; a real
+        // hand tracing a curve stays roughly upright and just translates.
+        onUpdateHand(pt.x, pt.y, 0);
       },
     });
   }
@@ -163,7 +164,7 @@
     pathEl.setAttribute('clip-path', `url(#${clipId})`);
     contentLayer.appendChild(pathEl);
 
-    const trackY = region.y + region.h / 2;
+    const trackY = beat.text_track_y !== undefined ? beat.text_track_y : region.y + region.h / 2;
     const state = { width: 0 };
 
     if (beat.reveal_keyframes && beat.reveal_keyframes.length > 0) {
@@ -201,6 +202,19 @@
         },
       });
     }
+  }
+
+  // ── Natural jitter ────────────────────────────────────────────────
+  // Layered sine waves, not random noise — random jitter looks like
+  // static/shaking, whereas real handwriting has small, semi-rhythmic
+  // wobble (the hand pausing/adjusting between letters). Amplitude is
+  // deliberately small (a few world-units) — this is a subtle "alive"
+  // quality, not a visible bounce.
+  function naturalJitter(t) {
+    return {
+      dx: Math.sin(t * 6.1) * 2.2 + Math.sin(t * 13.7) * 1.1,
+      dy: Math.sin(t * 4.3 + 1.0) * 2.6 + Math.sin(t * 9.9) * 1.0,
+    };
   }
 
   // ── Hand placement ───────────────────────────────────────────────
@@ -278,14 +292,16 @@
       // animateTextReveal docstring for why this replaced stroke-reveal).
       const h = beat.hand;
       animateTextReveal(beat, (px, py, angle) => {
-        placeHandSprite(h.file, px - h.anchor_x, py - h.anchor_y, h.w, h.h, angle, px, py);
+        const j = naturalJitter(performance.now() / 1000);
+        placeHandSprite(h.file, px + j.dx - h.anchor_x, py + j.dy - h.anchor_y, h.w, h.h, 0, px + j.dx, py + j.dy);
       });
     } else if (beat.mode === 'draw' && beat.region && beat.hand && beat.path_d) {
       // Icons: real single/multi-stroke line paths, stroke-reveal is the
       // correct technique here (unlike text).
       const h = beat.hand;
       animateStrokeReveal(beat, (px, py, angle) => {
-        placeHandSprite(h.file, px - h.anchor_x, py - h.anchor_y, h.w, h.h, angle, px, py);
+        const j = naturalJitter(performance.now() / 1000);
+        placeHandSprite(h.file, px + j.dx - h.anchor_x, py + j.dy - h.anchor_y, h.w, h.h, 0, px + j.dx, py + j.dy);
       });
     } else if (beat.mode === 'point' && beat.hand) {
       gsap.set({}, {
