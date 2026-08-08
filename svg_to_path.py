@@ -1,24 +1,24 @@
 """
 SVG icon -> positioned path data, fit into a world-space region.
 
-Extracts every <path> element's `d` attribute from a vendored icon
-SVG, concatenates them into one combined path (multiple subpaths in
-one string — SVG handles this natively, and getTotalLength()/
-getPointAtLength() treat it as one continuous length for the
-stroke-reveal animation, which is what we want: the pen draws subpath
-1, then subpath 2, in document order).
+IMPORTANT, confirmed via isolated testing (not assumed): stroke-dasharray
+/ stroke-dashoffset patterns RESTART at every disconnected subpath (every
+new "M" moveto command) — this is correct, spec'd SVG behavior, not a
+bug in the browser. It means a single dasharray/dashoffset pair CANNOT
+progressively reveal a multi-subpath icon (like a 6-stroke brain icon):
+each short subpath fits entirely inside the "visible" portion of the
+dash pattern regardless of the offset, so every subpath renders fully
+solid immediately. An earlier version of this module concatenated all
+subpaths into one `d` string assuming cumulative reveal would work —
+it doesn't, for anything with more than one subpath. Confirmed via a
+minimal isolated Playwright test before writing this fix.
 
-LIMITATION, stated plainly rather than silently mishandled: this only
-handles <path> elements. Tabler/Phosphor/Lucide/Iconoir icons are
-overwhelmingly path-based (that's WHY those libraries were picked —
-see the original brainstorm), but a small number of icons use <circle>,
-<rect>, or <line> primitives instead. Those elements are currently
-SKIPPED, not converted — an icon that's ONLY primitives (no <path> at
-all) will resolve to an empty path here. If that happens in practice,
-either swap that concept_key to a different icon library's version
-that IS path-based, or extend this module to convert primitives to
-path equivalents (straightforward — a <circle> is two arc commands —
-just not needed until a real case shows up).
+The correct approach — and a better visual match for "a hand actually
+drawing this icon" besides — is to keep each subpath SEPARATE and
+reveal them one at a time, in sequence. That's what this module now
+returns: a LIST of individual subpath `d` strings, not one merged
+string. scene_template.html animates each list entry with its own
+dasharray/dashoffset, in order.
 """
 import re
 import xml.etree.ElementTree as ET
@@ -38,10 +38,21 @@ def _parse_viewbox(svg_root) -> tuple:
     return (0.0, 0.0, w, h)
 
 
-def extract_paths(svg_path: str) -> Optional[str]:
-    """Returns a combined `d` string in the SVG's OWN coordinate
-    space (unscaled) — caller applies fit-to-region scaling. None if
-    the file has no usable <path> elements (see LIMITATION above)."""
+def extract_paths(svg_path: str) -> Optional[list]:
+    """Returns a LIST of `d` strings (one per <path> element found),
+    in the SVG's OWN coordinate space (unscaled) — caller applies
+    fit-to-region scaling. None if the file has no usable <path>
+    elements.
+
+    LIMITATION, stated plainly: this only handles <path> elements.
+    Tabler/Phosphor/Lucide/Iconoir icons are overwhelmingly path-based
+    (that's WHY those libraries were picked), but a small number of
+    icons use <circle>, <rect>, or <line> primitives instead — those
+    are currently SKIPPED, not converted. An icon that's ONLY
+    primitives resolves to an empty list here. If that happens in
+    practice, swap that concept_key to a different library's version,
+    or extend this to convert primitives to path equivalents.
+    """
     try:
         tree = ET.parse(svg_path)
     except Exception as e:
@@ -62,22 +73,19 @@ def extract_paths(svg_path: str) -> Optional[str]:
               f"see module docstring LIMITATION (primitive-only icon)")
         return None
 
-    return " ".join(ds)
+    return ds
 
 
 def icon_to_path_d(svg_path: str, region: dict, padding_ratio: float = 0.15) -> Optional[dict]:
     """Fits the icon's native viewBox into `region` (world-space
     {x,y,w,h}), preserving aspect ratio, centered, with padding.
-    Returns {"d": "...", "transform_note": "already baked into d"} —
-    like text_to_path, the scale/translate is applied to the actual
-    path coordinates via a wrapper transform string, kept SEPARATE
-    from the path `d` itself here (icons are simple enough this is
-    cheap to do at render time via an SVG <g transform>, unlike glyph
-    paths which get pre-baked in Python for the fit-before-layout
-    reason explained in text_to_path.py).
+    Returns {"subpaths": ["d1", "d2", ...], "transform": "..."} — the
+    SAME transform string applies to every subpath (they all share the
+    icon's coordinate space), kept separate from the path `d` values
+    themselves so the browser can apply it once per <path> element.
     """
-    d = extract_paths(svg_path)
-    if d is None:
+    subpaths = extract_paths(svg_path)
+    if subpaths is None:
         return None
 
     try:
@@ -101,4 +109,4 @@ def icon_to_path_d(svg_path: str, region: dict, padding_ratio: float = 0.15) -> 
 
     transform = f"translate({offset_x:.2f}, {offset_y:.2f}) scale({scale:.4f})"
 
-    return {"d": d, "transform": transform}
+    return {"subpaths": subpaths, "transform": transform}

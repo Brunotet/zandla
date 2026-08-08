@@ -252,7 +252,8 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             # target_height proportional to font_size — a real hand holding a
             # pen reads naturally at roughly 2.4x the text height; not a fixed
             # constant, so it stays right-sized whether the region is huge or tiny.
-            target_height = font_size * 2.4
+            # Bumped up from 2.4 -> 3.1x font_size (was reading as too small).
+            target_height = font_size * 3.1
             beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
             cam.add(CameraMove(action="zoom_in", region=region, duration=min(1.2, beat["end"] - beat["start"])),
@@ -275,17 +276,18 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                         f"<path> data (see svg_to_path.py LIMITATION) — pick a different icon for this "
                         f"concept_key or extend svg_to_path.py to handle primitive shapes."
                     )
-                beat_out["path_d"] = icon_path_info["d"]
+                beat_out["subpaths"] = icon_path_info["subpaths"]
                 beat_out["path_transform"] = icon_path_info["transform"]
             else:
                 # mask_wipe illustration — no path data, template reveals via clip-path sweep instead.
                 beat_out["illustration_path"] = asset_entry["asset_ref"].get("cached_path")
 
-            if "path_d" in beat_out:
+            if "subpaths" in beat_out or "path_d" in beat_out:
                 # target_height proportional to region size for icons — a hand
                 # tracing a small icon should be noticeably smaller than one
                 # writing a full sentence, not a fixed constant either way.
-                target_height = region["h"] * 0.5
+                # Bumped up from 0.5 -> 0.68 (was reading as too small).
+                target_height = region["h"] * 0.68
                 beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
             cam.add(CameraMove(action="zoom_in", region=region, duration=min(1.2, beat["end"] - beat["start"])),

@@ -84,48 +84,61 @@
   // draw_style='stroke_reveal'. Nothing generative happens here;
   // this just reveals a path that already fully exists.
   function animateStrokeReveal(beat, onUpdateHand) {
-    if (!beat.path_d) {
-      console.warn(`beat ${beat.beat_id}: no path_d, skipping stroke reveal`);
+    if (!beat.subpaths || beat.subpaths.length === 0) {
+      console.warn(`beat ${beat.beat_id}: no subpaths, skipping stroke reveal`);
       return;
     }
 
-    const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    pathEl.setAttribute('d', beat.path_d);
-    pathEl.setAttribute('class', 'drawable-path');
-    if (beat.path_transform) {
-      pathEl.setAttribute('transform', beat.path_transform);
-    }
-    contentLayer.appendChild(pathEl);
+    // CONFIRMED via isolated test: stroke-dasharray/dashoffset restarts
+    // at every disconnected subpath (every new "M" command) — a single
+    // dasharray pair cannot progressively reveal a multi-stroke icon,
+    // each subpath would render fully solid immediately regardless of
+    // offset. Each subpath gets its OWN <path> element and its own
+    // dasharray/dashoffset, animated in SEQUENCE — subpath 2 only
+    // starts once subpath 1 finishes. This also reads as more natural:
+    // a hand actually draws one stroke, then the next, not everything
+    // as a single impossible continuous line.
+    const pathEls = beat.subpaths.map((d) => {
+      const el = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      el.setAttribute('d', d);
+      el.setAttribute('class', 'drawable-path');
+      if (beat.path_transform) {
+        el.setAttribute('transform', beat.path_transform);
+      }
+      contentLayer.appendChild(el);
+      return el;
+    });
 
-    // getTotalLength()/getPointAtLength() operate in the path's LOCAL
-    // coordinate space — if a transform is applied (icon case), the
-    // hand-tracking point needs the same transform applied to match
-    // world-space. write-mode paths have no transform (already baked
-    // into path_d by text_to_path.py), so this is a no-op for those.
-    const ctm = beat.path_transform ? pathEl.getCTM() : null;
+    const ctm = beat.path_transform ? pathEls[0].getCTM() : null;
+    const lens = pathEls.map((el) => el.getTotalLength());
+    pathEls.forEach((el, i) => {
+      el.style.strokeDasharray = lens[i];
+      el.style.strokeDashoffset = lens[i];
+    });
 
-    const len = pathEl.getTotalLength();
-    pathEl.style.strokeDasharray = len;
-    pathEl.style.strokeDashoffset = len;
+    const totalLen = lens.reduce((a, b) => a + b, 0) || 1;
+    const totalDuration = beat.end - beat.start;
+    const tl = gsap.timeline({ delay: beat.start });
 
-    const duration = beat.end - beat.start;
-    gsap.to(pathEl.style, {
-      strokeDashoffset: 0,
-      duration,
-      delay: beat.start,
-      ease: 'none',
-      onUpdate: function () {
-        const progress = this.progress();
-        let pt = pathEl.getPointAtLength(progress * len);
-        if (ctm) {
-          pt = pt.matrixTransform(ctm);
-        }
-        // No rotation — hand stays upright regardless of path curvature.
-        // Tracking the tangent angle (old approach) made the hand visibly
-        // spin around curvy icon paths, which reads as unnatural; a real
-        // hand tracing a curve stays roughly upright and just translates.
-        onUpdateHand(pt.x, pt.y, 0);
-      },
+    pathEls.forEach((el, i) => {
+      // Time allocated per subpath proportional to its share of total
+      // path length — a long stroke gets proportionally more time than
+      // a short tick mark, not an equal split regardless of length.
+      const segDuration = Math.max(0.05, totalDuration * (lens[i] / totalLen));
+      tl.to(el.style, {
+        strokeDashoffset: 0,
+        duration: segDuration,
+        ease: 'none',
+        onUpdate: function () {
+          const progress = this.progress();
+          let pt = el.getPointAtLength(progress * lens[i]);
+          if (ctm) {
+            pt = pt.matrixTransform(ctm);
+          }
+          // No rotation — hand stays upright regardless of path curvature.
+          onUpdateHand(pt.x, pt.y, 0);
+        },
+      });
     });
   }
 
@@ -207,13 +220,19 @@
   // ── Natural jitter ────────────────────────────────────────────────
   // Layered sine waves, not random noise — random jitter looks like
   // static/shaking, whereas real handwriting has small, semi-rhythmic
-  // wobble (the hand pausing/adjusting between letters). Amplitude is
-  // deliberately small (a few world-units) — this is a subtle "alive"
-  // quality, not a visible bounce.
-  function naturalJitter(t) {
+  // wobble (the hand pausing/adjusting/lifting slightly between
+  // letters or strokes). Amplitude is PROPORTIONAL TO HAND SIZE, not a
+  // fixed constant — a fixed few-world-units wobble was imperceptible
+  // once the hand's actual size scaled up, which is why it looked like
+  // a flat robotic slide instead of writing. Passing handHeight makes
+  // this scale correctly whether the hand is small (icon) or large
+  // (full-sentence write).
+  function naturalJitter(t, handHeight) {
+    const ampY = handHeight * 0.16;   // vertical wobble — the dominant "writing" motion
+    const ampX = handHeight * 0.09;   // smaller horizontal drift
     return {
-      dx: Math.sin(t * 6.1) * 2.2 + Math.sin(t * 13.7) * 1.1,
-      dy: Math.sin(t * 4.3 + 1.0) * 2.6 + Math.sin(t * 9.9) * 1.0,
+      dx: Math.sin(t * 5.4) * ampX + Math.sin(t * 11.3) * ampX * 0.4,
+      dy: Math.sin(t * 3.7 + 1.0) * ampY + Math.sin(t * 8.6) * ampY * 0.35,
     };
   }
 
@@ -292,15 +311,15 @@
       // animateTextReveal docstring for why this replaced stroke-reveal).
       const h = beat.hand;
       animateTextReveal(beat, (px, py, angle) => {
-        const j = naturalJitter(performance.now() / 1000);
+        const j = naturalJitter(performance.now() / 1000, h.h);
         placeHandSprite(h.file, px + j.dx - h.anchor_x, py + j.dy - h.anchor_y, h.w, h.h, 0, px + j.dx, py + j.dy);
       });
-    } else if (beat.mode === 'draw' && beat.region && beat.hand && beat.path_d) {
+    } else if (beat.mode === 'draw' && beat.region && beat.hand && beat.subpaths) {
       // Icons: real single/multi-stroke line paths, stroke-reveal is the
       // correct technique here (unlike text).
       const h = beat.hand;
       animateStrokeReveal(beat, (px, py, angle) => {
-        const j = naturalJitter(performance.now() / 1000);
+        const j = naturalJitter(performance.now() / 1000, h.h);
         placeHandSprite(h.file, px + j.dx - h.anchor_x, py + j.dy - h.anchor_y, h.w, h.h, 0, px + j.dx, py + j.dy);
       });
     } else if (beat.mode === 'point' && beat.hand) {
