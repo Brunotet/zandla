@@ -79,7 +79,7 @@ def text_advance_width(text: str, font_size: float) -> float:
             continue
         c = _char_data(ch, chars)
         advance = c["o"] if c else _NATIVE_Y_SPAN * 0.5
-        total += advance * scale
+        total += advance * scale + font_size * 0.012
     return total
 
 
@@ -161,7 +161,12 @@ def text_to_strokes(text: str, x: float, y: float, font_size: float) -> dict:
             transformed = re.sub(r"(-?\d+\.?\d*),(-?\d+\.?\d*)", _transform_coords, raw_sub)
             all_subpaths.append(transformed)
 
-        cursor_x += c["o"] * scale
+        # Small extra breathing room between letters (matches the
+        # reference library's "charSpacingAdjust" mechanism) — pure
+        # advance-width spacing reads slightly crowded for cursive
+        # connecting strokes; a touch of extra gap keeps it readable
+        # without breaking the connected-cursive look.
+        cursor_x += c["o"] * scale + font_size * 0.012
 
     _flush_word()
 
