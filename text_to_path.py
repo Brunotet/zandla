@@ -40,7 +40,7 @@ HERSHEY_JSON_PATH = os.path.join(os.path.dirname(__file__), "vendor", "fonts", "
 # This font's own coordinate system spans roughly this Y range
 # (measured directly from the vendored data, not assumed) — used as
 # the reference "em size" for scaling to a target pixel font_size.
-_NATIVE_Y_SPAN = 37.0
+_NATIVE_Y_SPAN = 32.0
 
 
 @lru_cache(maxsize=1)
