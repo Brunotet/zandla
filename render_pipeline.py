@@ -205,6 +205,9 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             text_x = region["x"] + region["w"] * pad
             text_y = region["y"] + region["h"] * pad
             stroke_info = text_to_path.text_to_strokes(beat["text"], x=text_x, y=text_y, font_size=font_size)
+            print(f"[render_pipeline] beat_id={beat['beat_id']} write mode: text={beat['text']!r} "
+                  f"font_size={font_size:.1f} region={region} -> {len(stroke_info['subpaths'])} subpaths, "
+                  f"{len(stroke_info['word_groups'])} words, text_width={stroke_info['width']:.1f}")
 
             beat_out["subpaths"] = stroke_info["subpaths"]
             beat_out["path_transform"] = None  # already baked into each subpath's coordinates
