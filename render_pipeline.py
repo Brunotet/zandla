@@ -210,6 +210,15 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                   f"{len(stroke_info['word_groups'])} words, text_width={stroke_info['width']:.1f}")
 
             beat_out["subpaths"] = stroke_info["subpaths"]
+            # Stroke width proportional to font_size, NOT a fixed pixel
+            # value — a constant stroke width was fine-looking at a big
+            # font_size but became enormous relative to letters once a
+            # smaller region (real script text, not a short test phrase)
+            # forced font_size down to ~35px, causing adjacent pen
+            # strokes to visually smear together into illegible mush.
+            # This ratio keeps ink thickness looking natural regardless
+            # of how big or small the text ends up rendering.
+            beat_out["stroke_width"] = max(1.5, font_size * 0.045)
             beat_out["path_transform"] = None  # already baked into each subpath's coordinates
             beat_out["region"] = region
 
@@ -256,7 +265,8 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             # pen reads naturally at roughly 2.4x the text height; not a fixed
             # constant, so it stays right-sized whether the region is huge or tiny.
             # Bumped up from 2.4 -> 3.1x font_size (was reading as too small).
-            target_height = font_size * 3.1
+            # Bumped up again per feedback: 3.1 -> 4.0x font_size.
+            target_height = font_size * 4.0
             beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
             cam.add(CameraMove(action="zoom_in", region=region, duration=min(1.2, beat["end"] - beat["start"])),
@@ -280,6 +290,15 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                         f"concept_key or extend svg_to_path.py to handle primitive shapes."
                     )
                 beat_out["subpaths"] = icon_path_info["subpaths"]
+                # Icons DO have a wrapping scale transform (unlike text,
+                # where scale is baked directly into coordinates) — a
+                # stroke-width attribute gets multiplied by that
+                # transform's scale when rendered, so to land on a
+                # consistent ~5px VISUAL width regardless of how much
+                # the icon itself got scaled up/down, divide by that
+                # same scale factor here.
+                beat_out["stroke_width"] = max(1.0, 5.0 / icon_path_info["scale"])
+                beat_out["min_reveal_duration"] = 1.3
                 beat_out["path_transform"] = icon_path_info["transform"]
             else:
                 # mask_wipe illustration — no path data, template reveals via clip-path sweep instead.
@@ -290,7 +309,8 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 # tracing a small icon should be noticeably smaller than one
                 # writing a full sentence, not a fixed constant either way.
                 # Bumped up from 0.5 -> 0.68 (was reading as too small).
-                target_height = region["h"] * 0.68
+                # Bumped up again per feedback: 0.68 -> 0.85x region height.
+                target_height = region["h"] * 0.85
                 beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
             cam.add(CameraMove(action="zoom_in", region=region, duration=min(1.2, beat["end"] - beat["start"])),

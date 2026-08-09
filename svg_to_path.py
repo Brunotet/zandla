@@ -109,4 +109,4 @@ def icon_to_path_d(svg_path: str, region: dict, padding_ratio: float = 0.15) -> 
 
     transform = f"translate({offset_x:.2f}, {offset_y:.2f}) scale({scale:.4f})"
 
-    return {"subpaths": subpaths, "transform": transform}
+    return {"subpaths": subpaths, "transform": transform, "scale": scale}

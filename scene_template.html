@@ -6,7 +6,7 @@
   html, body { margin: 0; padding: 0; background: #f7f4ed; overflow: hidden; }
   #stage { position: relative; width: 1920px; height: 1080px; }
   #world { width: 100%; height: 100%; display: block; }
-  .drawable-path { fill: none; stroke: #1a1a1a; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+  .drawable-path { fill: none; stroke: #1a1a1a; stroke-linecap: round; stroke-linejoin: round; }
   .illustration-img { }
   /* Fixed UI layer — deliberately OUTSIDE #world, never touched by camera moves */
   #caption-layer { position: absolute; bottom: 40px; left: 0; right: 0; text-align: center;
@@ -103,6 +103,12 @@
       const el = document.createElementNS('http://www.w3.org/2000/svg', 'path');
       el.setAttribute('d', d);
       el.setAttribute('class', 'drawable-path');
+      // Explicit per-beat stroke width, computed in Python (see
+      // render_pipeline.py) — different formula for text (proportional
+      // to font_size) vs icons (compensating for their scale
+      // transform), since a single fixed width was wrong for both at
+      // once. Falls back to 4 only if somehow missing.
+      el.style.strokeWidth = beat.stroke_width || 4;
       if (beat.path_transform) {
         el.setAttribute('transform', beat.path_transform);
       }
@@ -127,7 +133,13 @@
     //    a short tick mark).
     const hasRealTiming = beat.segment_durations && beat.segment_delays;
     const totalLen = lens.reduce((a, b) => a + b, 0) || 1;
-    const totalDuration = beat.end - beat.start;
+    // Real Chatterbox speech for a short icon-beat line can be well
+    // under a second — technically still sequential, but too fast for
+    // a human to actually perceive as "drawing" rather than "flashing
+    // in". Icons don't need millisecond-precise lockstep with speech
+    // the way word-level text does, so clamp to a minimum that's
+    // actually watchable.
+    const totalDuration = Math.max(beat.end - beat.start, beat.min_reveal_duration || 0);
     const tl = gsap.timeline({ delay: beat.start });
 
     pathEls.forEach((el, i) => {
