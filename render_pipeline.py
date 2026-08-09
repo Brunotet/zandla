@@ -194,55 +194,55 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 )
 
         if beat["mode"] == "write" and region:
-            # Text mode: real glyph paths, computed deterministically in
-            # Python (see text_to_path.py) — no font loading or generative
-            # step happens in the browser at render time.
+            # Text mode: REAL pen strokes via Hershey single-stroke font
+            # data (see text_to_path.py docstring for why this replaced
+            # the earlier filled-font approach) — computed deterministically
+            # in Python, no font loading or generative step at render time.
             pad = 0.15
             usable_w = region["w"] * (1 - 2 * pad)
             usable_h = region["h"] * (1 - 2 * pad)
             font_size = text_to_path.fit_font_size(beat["text"], usable_w, usable_h)
-            path_info = text_to_path.text_to_path_d(
-                beat["text"],
-                x=region["x"] + region["w"] * pad,
-                y=region["y"] + region["h"] * pad,
-                font_size=font_size,
-            )
-            beat_out["path_d"] = path_info["d"]
-            beat_out["path_transform"] = None  # already baked into path_d, no wrapper transform needed
+            text_x = region["x"] + region["w"] * pad
+            text_y = region["y"] + region["h"] * pad
+            stroke_info = text_to_path.text_to_strokes(beat["text"], x=text_x, y=text_y, font_size=font_size)
+
+            beat_out["subpaths"] = stroke_info["subpaths"]
+            beat_out["path_transform"] = None  # already baked into each subpath's coordinates
             beat_out["region"] = region
-            # Actual vertical center of the drawn text, NOT the region's
-            # center — the region has padding above/below the text, so
-            # tracking region.h/2 put the hand floating well below the
-            # letters. ~0.35*font_size approximates the visual mid-height
-            # of lowercase-heavy text (between baseline and x-height/ascender).
-            text_top_y = region["y"] + region["h"] * pad
-            beat_out["text_track_y"] = text_top_y + font_size * 0.35
 
             # Real per-word Chatterbox timestamps drive reveal pace —
-            # NOT a uniform slide across the whole sentence. Slice the
-            # global word list to this beat's time window, then zip
-            # positionally against text_to_path's word_boundaries (same
-            # word count expected since beat.text is a straight slice
-            # of the full script). If counts don't match — e.g. a
-            # tokenization mismatch between Chatterbox's words and a
-            # plain whitespace split — fall back to a uniform reveal
-            # rather than producing garbled/misaligned keyframes; this
-            # is logged, not silent, so a mismatch is visible in the
-            # render log instead of just looking subtly wrong.
+            # NOT a uniform slide. Each word maps to a RANGE of subpaths
+            # (a word can be several pen strokes); that word's real
+            # speech duration is split across just its own subpaths,
+            # proportional to each stroke's own length, not divided
+            # evenly across the whole sentence regardless of which word
+            # is being spoken. Falls back to length-proportional across
+            # the WHOLE beat (same technique as icons) if word counts
+            # don't line up — logged, not silent, so a mismatch is
+            # visible in the render log rather than just looking off.
             global_words = timing["words"]
             beat_words = [w for w in global_words if beat["start"] - 0.05 <= w["start"] < beat["end"] + 0.05]
-            word_boundaries = path_info["word_boundaries"]
+            word_groups = stroke_info["word_groups"]
 
-            if len(beat_words) == len(word_boundaries) and len(beat_words) > 0:
-                beat_out["reveal_keyframes"] = [
-                    {"t": max(0.0, gw["start"] - beat["start"]), "x_end": wb["x_end"]}
-                    for gw, wb in zip(beat_words, word_boundaries)
-                ]
+            if len(beat_words) == len(word_groups) and len(beat_words) > 0:
+                segment_durations = [None] * len(stroke_info["subpaths"])
+                segment_delays = [None] * len(stroke_info["subpaths"])
+                for gw, wg in zip(beat_words, word_groups):
+                    word_start = max(0.0, gw["start"] - beat["start"])
+                    word_duration = max(0.05, gw["end"] - gw["start"])
+                    n_strokes = wg["subpath_end"] - wg["subpath_start"]
+                    per_stroke = word_duration / max(1, n_strokes)
+                    for i in range(wg["subpath_start"], wg["subpath_end"]):
+                        segment_delays[i] = word_start + (i - wg["subpath_start"]) * per_stroke
+                        segment_durations[i] = per_stroke
+                beat_out["segment_durations"] = segment_durations
+                beat_out["segment_delays"] = segment_delays
             else:
                 print(f"[render_pipeline] beat_id={beat['beat_id']}: word count mismatch "
-                      f"(chatterbox={len(beat_words)}, text_to_path={len(word_boundaries)}) "
-                      f"— falling back to uniform-speed reveal for this beat")
-                beat_out["reveal_keyframes"] = None
+                      f"(chatterbox={len(beat_words)}, text_to_path={len(word_groups)}) "
+                      f"— falling back to length-proportional reveal for this beat")
+                beat_out["segment_durations"] = None
+                beat_out["segment_delays"] = None
 
             # NOTE: hand tracks the LIVE point on the stroke-reveal path every
             # frame, not a single static target — so we hand the template the

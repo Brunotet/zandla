@@ -7,7 +7,6 @@
   #stage { position: relative; width: 1920px; height: 1080px; }
   #world { width: 100%; height: 100%; display: block; }
   .drawable-path { fill: none; stroke: #1a1a1a; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
-  .text-fill-path { fill: #1a1a1a; stroke: none; }
   .illustration-img { }
   /* Fixed UI layer — deliberately OUTSIDE #world, never touched by camera moves */
   #caption-layer { position: absolute; bottom: 40px; left: 0; right: 0; text-align: center;
@@ -78,7 +77,7 @@
   }
 
   // ── Stroke-reveal drawing (write/draw modes) ────────────────────
-  // path_d comes pre-computed from Python — text_to_path.py (real
+  // subpaths come pre-computed from Python — text_to_path.py (real
   // glyph outlines, deterministic) for 'write' beats, svg_to_path.py
   // (extracted + fitted icon paths) for 'draw' beats with
   // draw_style='stroke_reveal'. Nothing generative happens here;
@@ -91,13 +90,15 @@
 
     // CONFIRMED via isolated test: stroke-dasharray/dashoffset restarts
     // at every disconnected subpath (every new "M" command) — a single
-    // dasharray pair cannot progressively reveal a multi-stroke icon,
+    // dasharray pair cannot progressively reveal a multi-stroke path,
     // each subpath would render fully solid immediately regardless of
     // offset. Each subpath gets its OWN <path> element and its own
-    // dasharray/dashoffset, animated in SEQUENCE — subpath 2 only
-    // starts once subpath 1 finishes. This also reads as more natural:
-    // a hand actually draws one stroke, then the next, not everything
-    // as a single impossible continuous line.
+    // dasharray/dashoffset, animated in SEQUENCE. This is also what
+    // makes both icons AND text (as of the Hershey single-stroke font
+    // switch — see text_to_path.py) read as genuine drawing: a hand
+    // actually traces one real stroke, then the next, following each
+    // stroke's real curve — not a synthetic wipe with no relationship
+    // to the letter shapes.
     const pathEls = beat.subpaths.map((d) => {
       const el = document.createElementNS('http://www.w3.org/2000/svg', 'path');
       el.setAttribute('d', d);
@@ -116,15 +117,25 @@
       el.style.strokeDashoffset = lens[i];
     });
 
+    // Two timing modes:
+    // 1. Real per-segment durations/delays from render_pipeline.py
+    //    (write-mode text, computed from actual Chatterbox word
+    //    timestamps — each stroke plays at the moment it's actually
+    //    spoken, not a generic split).
+    // 2. Length-proportional fallback (icons — no speech timing to
+    //    anchor to, so a longer stroke reasonably gets more time than
+    //    a short tick mark).
+    const hasRealTiming = beat.segment_durations && beat.segment_delays;
     const totalLen = lens.reduce((a, b) => a + b, 0) || 1;
     const totalDuration = beat.end - beat.start;
     const tl = gsap.timeline({ delay: beat.start });
 
     pathEls.forEach((el, i) => {
-      // Time allocated per subpath proportional to its share of total
-      // path length — a long stroke gets proportionally more time than
-      // a short tick mark, not an equal split regardless of length.
-      const segDuration = Math.max(0.05, totalDuration * (lens[i] / totalLen));
+      const segDuration = hasRealTiming
+        ? Math.max(0.03, beat.segment_durations[i])
+        : Math.max(0.05, totalDuration * (lens[i] / totalLen));
+      const position = hasRealTiming ? beat.segment_delays[i] : undefined;
+
       tl.to(el.style, {
         strokeDashoffset: 0,
         duration: segDuration,
@@ -138,83 +149,8 @@
           // No rotation — hand stays upright regardless of path curvature.
           onUpdateHand(pt.x, pt.y, 0);
         },
-      });
+      }, position);
     });
-  }
-
-  // ── Text reveal (write mode) ─────────────────────────────────────
-  // Font glyphs are FILLED shapes, not single-stroke lines — tracing
-  // their outline with a thick stroke (the old approach) nearly merges
-  // into a solid blob, and a sentence's glyph path has many
-  // disconnected pieces (every letter, every hole like the inside of
-  // an "o" or "e"), so stroke-reveal follows path DATA order, not
-  // left-to-right, which is what made the hand look like it was
-  // jumping around randomly. Filling the real letterforms (correct —
-  // that's what makes the handwriting font look right) and revealing
-  // via a left-to-right wipe fixes both problems: readable text, and
-  // hand tracking a smooth linear sweep instead of erratic path order.
-  function animateTextReveal(beat, onUpdateHand) {
-    if (!beat.path_d || !beat.region) {
-      console.warn(`beat ${beat.beat_id}: no path_d/region, skipping text reveal`);
-      return;
-    }
-    const region = beat.region;
-
-    const clipId = `text-clip-${beat.beat_id}`;
-    const clip = document.createElementNS('http://www.w3.org/2000/svg', 'clipPath');
-    clip.setAttribute('id', clipId);
-    const clipRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-    clipRect.setAttribute('x', region.x);
-    clipRect.setAttribute('y', region.y);
-    clipRect.setAttribute('width', 0);
-    clipRect.setAttribute('height', region.h);
-    clip.appendChild(clipRect);
-    contentLayer.appendChild(clip);
-
-    const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    pathEl.setAttribute('d', beat.path_d);
-    pathEl.setAttribute('class', 'text-fill-path');
-    pathEl.setAttribute('clip-path', `url(#${clipId})`);
-    contentLayer.appendChild(pathEl);
-
-    const trackY = beat.text_track_y !== undefined ? beat.text_track_y : region.y + region.h / 2;
-    const state = { width: 0 };
-
-    if (beat.reveal_keyframes && beat.reveal_keyframes.length > 0) {
-      // Real per-word Chatterbox timing — piecewise reveal that hits
-      // each word's actual x-position at the moment it's actually
-      // spoken, not a uniform slide across the whole sentence.
-      const tl = gsap.timeline({ delay: beat.start });
-      let prevT = 0;
-      beat.reveal_keyframes.forEach((kf) => {
-        const segDuration = Math.max(0.02, kf.t - prevT);
-        const targetWidth = kf.x_end - region.x;
-        tl.to(state, {
-          width: targetWidth,
-          duration: segDuration,
-          ease: 'none',
-          onUpdate: () => {
-            clipRect.setAttribute('width', Math.max(0, state.width));
-            onUpdateHand(region.x + state.width, trackY, 0);
-          },
-        }, prevT);
-        prevT = kf.t;
-      });
-    } else {
-      // Fallback: uniform-speed reveal (used only if word-count
-      // mismatch was logged in render_pipeline.py for this beat).
-      const duration = beat.end - beat.start;
-      gsap.to(state, {
-        width: region.w,
-        duration,
-        delay: beat.start,
-        ease: 'none',
-        onUpdate: () => {
-          clipRect.setAttribute('width', Math.max(0, state.width));
-          onUpdateHand(region.x + state.width, trackY, 0);
-        },
-      });
-    }
   }
 
   // ── Natural jitter ────────────────────────────────────────────────
@@ -306,22 +242,17 @@
       animateMaskWipe(beat);
       return;
     }
-    if (beat.mode === 'write' && beat.region && beat.hand && beat.path_d) {
-      // Text: filled glyph shapes revealed via left-to-right wipe (see
-      // animateTextReveal docstring for why this replaced stroke-reveal).
-      const h = beat.hand;
-      animateTextReveal(beat, (px, py, angle) => {
-        const j = naturalJitter(performance.now() / 1000, h.h);
-        placeHandSprite(h.file, px + j.dx - h.anchor_x, py + j.dy - h.anchor_y, h.w, h.h, 0, px + j.dx, py + j.dy);
-      });
-    } else if (beat.mode === 'draw' && beat.region && beat.hand && beat.subpaths) {
-      // Icons: real single/multi-stroke line paths, stroke-reveal is the
-      // correct technique here (unlike text).
+    if ((beat.mode === 'write' || beat.mode === 'draw') && beat.region && beat.hand && beat.subpaths) {
+      // Both text (real Hershey pen strokes) and icons now use the
+      // SAME proven stroke-reveal renderer — one technique, one place
+      // for a bug to hide, not two separate hacks to keep in sync.
       const h = beat.hand;
       animateStrokeReveal(beat, (px, py, angle) => {
         const j = naturalJitter(performance.now() / 1000, h.h);
         placeHandSprite(h.file, px + j.dx - h.anchor_x, py + j.dy - h.anchor_y, h.w, h.h, 0, px + j.dx, py + j.dy);
       });
+    } else if (beat.mode === 'draw' && beat.illustration_path) {
+      animateMaskWipe(beat);
     } else if (beat.mode === 'point' && beat.hand) {
       gsap.set({}, {
         delay: beat.start,
