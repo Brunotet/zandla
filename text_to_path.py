@@ -75,7 +75,7 @@ def text_advance_width(text: str, font_size: float) -> float:
     total = 0.0
     for ch in text:
         if ch == " ":
-            total += font_size * 0.5
+            total += font_size * 0.22
             continue
         c = _char_data(ch, chars)
         advance = c["o"] if c else _NATIVE_Y_SPAN * 0.5
@@ -134,7 +134,7 @@ def text_to_strokes(text: str, x: float, y: float, font_size: float) -> dict:
         if ch == " ":
             _flush_word()
             current_word = ""
-            cursor_x += font_size * 0.5
+            cursor_x += font_size * 0.22
             current_word_start_idx = len(all_subpaths)
             continue
 
@@ -144,7 +144,7 @@ def text_to_strokes(text: str, x: float, y: float, font_size: float) -> dict:
 
         c = _char_data(ch, chars)
         if c is None:
-            cursor_x += font_size * 0.5
+            cursor_x += font_size * 0.22
             continue
 
         for raw_sub in _split_subpaths(c["d"]):

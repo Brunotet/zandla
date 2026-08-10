@@ -262,12 +262,23 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             # placement. The template subtracts anchor_x/anchor_y from the
             # moving pen-tip point each frame. See scene_template.html.
             # target_height proportional to font_size — a real hand holding a
-            # pen reads naturally at roughly 2.4x the text height; not a fixed
+            # pen reads naturally scaled to the text height, not a fixed
             # constant, so it stays right-sized whether the region is huge or tiny.
-            # Bumped up from 2.4 -> 3.1x font_size (was reading as too small).
-            # Bumped up again per feedback: 3.1 -> 4.0x font_size.
-            # Bumped again per feedback: 4.0 -> 4.6x font_size.
-            target_height = font_size * 4.6
+            #
+            # BUG FOUND (not just "needs more tuning"): earlier rounds only
+            # bumped this multiplier, but font_size itself SHRINKS for long
+            # sentences (fit_font_size forces it down to fit the region) —
+            # so a bigger multiplier on a smaller font_size netted out to
+            # almost no visible change (4.6*18.2=84 vs the previous
+            # round's 4.0*20.2=81 — barely different). Clamping relative
+            # to the REGION's own size (like icon-mode already correctly
+            # does) fixes this for good: a floor so long sentences still
+            # get a visibly-sized hand, a ceiling so short sentences with
+            # a large font_size don't produce an absurdly oversized one.
+            target_height = max(
+                region["h"] * 0.40,
+                min(font_size * 4.6, region["h"] * 0.85),
+            )
             beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
             cam.add(CameraMove(action="zoom_in", region=region, duration=min(1.2, beat["end"] - beat["start"])),
