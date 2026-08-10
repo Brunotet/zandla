@@ -266,7 +266,8 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             # constant, so it stays right-sized whether the region is huge or tiny.
             # Bumped up from 2.4 -> 3.1x font_size (was reading as too small).
             # Bumped up again per feedback: 3.1 -> 4.0x font_size.
-            target_height = font_size * 4.0
+            # Bumped again per feedback: 4.0 -> 4.6x font_size.
+            target_height = font_size * 4.6
             beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
             cam.add(CameraMove(action="zoom_in", region=region, duration=min(1.2, beat["end"] - beat["start"])),
@@ -310,7 +311,8 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 # writing a full sentence, not a fixed constant either way.
                 # Bumped up from 0.5 -> 0.68 (was reading as too small).
                 # Bumped up again per feedback: 0.68 -> 0.85x region height.
-                target_height = region["h"] * 0.85
+                # Bumped again per feedback: 0.85 -> 0.95x region height.
+                target_height = region["h"] * 0.95
                 beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
             cam.add(CameraMove(action="zoom_in", region=region, duration=min(1.2, beat["end"] - beat["start"])),
