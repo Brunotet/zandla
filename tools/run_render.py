@@ -39,22 +39,25 @@ def main():
         beats=payload["beats"],
         channel=args.channel,
         voice=payload.get("voice"),
+        orientation=payload.get("orientation", "landscape"),
     )
 
     scene_path = "/tmp/scene_program.json"
     with open(scene_path, "w") as f:
         json.dump(scene, f, indent=2)
-    print(f"[run_render] scene program written to {scene_path} ({len(scene['beats'])} beats)")
+    print(f"[run_render] scene program written to {scene_path} "
+          f"({len(scene['beats'])} beats, orientation={scene['orientation']}, "
+          f"frame={scene['frame']['width']}x{scene['frame']['height']})")
 
     duration = scene["beats"][-1]["end"] if scene["beats"] else 5.0
     video_no_audio = "/tmp/video_no_audio.webm"
 
-    _capture_with_playwright(scene_path, duration, video_no_audio)
+    _capture_with_playwright(scene_path, duration, video_no_audio, scene["frame"])
     _mux_audio(video_no_audio, scene["audio_path"], args.out)
     print(f"[run_render] done -> {args.out}")
 
 
-def _capture_with_playwright(scene_path: str, duration: float, out_path: str):
+def _capture_with_playwright(scene_path: str, duration: float, out_path: str, frame: dict):
     from playwright.sync_api import sync_playwright
 
     template_path = os.path.join(os.path.dirname(__file__), "..", "scene_template.html")
@@ -66,9 +69,9 @@ def _capture_with_playwright(scene_path: str, duration: float, out_path: str):
     with sync_playwright() as p:
         browser = p.chromium.launch()
         context = browser.new_context(
-            viewport={"width": 1920, "height": 1080},
+            viewport={"width": frame["width"], "height": frame["height"]},
             record_video_dir=os.path.dirname(out_path),
-            record_video_size={"width": 1920, "height": 1080},
+            record_video_size={"width": frame["width"], "height": frame["height"]},
         )
         page = context.new_page()
 
