@@ -26,7 +26,7 @@ import asset_resolver
 import gesture_engine
 import text_to_path
 import svg_to_path
-from camera import Camera, CameraMove
+from camera import Camera, CameraMove, get_frame_dims, get_board_dims, get_default_view, region_for_bbox, _fit_aspect
 from beat_schema import validate_batch, load_vocabulary, GESTURE_FOR_MODE
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -96,16 +96,22 @@ def resolve_beat_asset(beat: dict, channel: str, illustration_cache_dir: str) ->
 # ══════════════════════════════════════════════════════════════════
 # World-space layout
 # ══════════════════════════════════════════════════════════════════
-def _layout_board(beats: List[dict]) -> dict:
+def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
     """Simple left-to-right, wrapping flow layout: each draw/write beat
     gets a slot on the world-space board in script order. This is
     intentionally the simplest thing that works — deterministic,
     debuggable, no packing algorithm. Replace with something smarter
     (e.g. grouping related concepts spatially) once real scripts show
     where a flow layout looks awkward, not before.
+
+    Column count is derived from the board's own aspect ratio, not a
+    fixed constant — a portrait board is much narrower, so packing 6
+    columns across it would make every slot uncomfortably thin. Fewer,
+    taller columns for portrait; more, wider ones for landscape.
     """
+    board = get_board_dims(orientation)
     SLOT_W, SLOT_H = 500, 400
-    COLS = 6
+    COLS = max(2, board["width"] // SLOT_W)
     MARGIN = 100
 
     layout = {}
@@ -126,7 +132,8 @@ def _layout_board(beats: List[dict]) -> dict:
 # Scene program assembly
 # ══════════════════════════════════════════════════════════════════
 def build_scene_program(script_text: str, beats: List[dict], channel: str,
-                         voice: str = None, illustration_cache_dir: str = "/tmp/illustration_cache") -> dict:
+                         voice: str = None, illustration_cache_dir: str = "/tmp/illustration_cache",
+                         orientation: str = "landscape") -> dict:
     vocab = load_vocabulary(SHARED_LIBRARY_PATH, _channel_library_path(channel))
     # Beats can introduce NEW concept_keys not yet in any library — that's fine, they'll be
     # resolved and appended below. validate_batch's vocabulary check is for CATCHING TYPOS
@@ -139,7 +146,9 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
     timing = voice_engine.words_for_beats(script_text, beats, voice=voice)
     timed_beats = timing["beats"]
 
-    board_layout = _layout_board(timed_beats)
+    frame = get_frame_dims(orientation)
+    board = get_board_dims(orientation)
+    board_layout = _layout_board(timed_beats, orientation=orientation)
 
     # Start the camera ALREADY FRAMED on the first beat's region rather
     # than the full board — a slow zoom-in ramp from a wide default view
@@ -151,11 +160,10 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
     for b in timed_beats:
         r = board_layout.get(b["beat_id"])
         if r:
-            from camera import region_for_bbox, _fit_aspect
-            first_region = _fit_aspect(region_for_bbox(r, padding=60))
+            first_region = _fit_aspect(region_for_bbox(r, padding=60), frame["width"] / frame["height"])
             break
 
-    cam = Camera(start_view=first_region)
+    cam = Camera(start_view=first_region, orientation=orientation)
     t_cursor = 0.0
     scene_beats = []
 
@@ -355,9 +363,9 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
         elif beat["mode"] == "swipe":
             sweep = gesture_engine.scaled_swipe(
                 direction=beat.get("swipe_direction", "ltr"),
-                frame_width=1920, target_height=280,
+                frame_width=frame["width"], target_height=280,
             )
-            sweep["y"] = 540 - sweep["anchor_y"]
+            sweep["y"] = frame["height"] / 2 - sweep["anchor_y"]
             beat_out["hand_sweep"] = sweep
             cam.add(CameraMove(action="zoom_out", duration=0.6), start_t=beat["start"])
 
@@ -369,7 +377,9 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
     return {
         "channel": channel,
         "audio_path": timing["audio_path"],
-        "board": {"width": 3840, "height": 2160},
+        "orientation": orientation,
+        "frame": frame,
+        "board": board,
         "camera_keyframes": json.loads(cam.gsap_keyframes_js()),
         "beats": scene_beats,
     }

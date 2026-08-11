@@ -27,15 +27,41 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 import math
 
-# Default board size — generous world-space canvas. Tune once you know
-# how spread out a typical multi-beat script's content ends up being;
-# this is a starting point, not a hard constraint (content can exceed
-# it, the camera just won't have anywhere "wide" to pull back to).
-BOARD_WIDTH = 3840
-BOARD_HEIGHT = 2160
+# Frame presets — width/height in world-space units for each output
+# orientation. BOARD dims are 2x the frame size in each axis, giving
+# room to pan/zoom around; DEFAULT_VIEW is the fully-zoomed-out frame
+# centered on that board. Add new presets here if a channel needs a
+# different aspect (e.g. square for some platforms) — everything else
+# in the pipeline reads from get_frame_dims(), nothing else hardcodes
+# a resolution.
+FRAME_PRESETS = {
+    "landscape": {"width": 1920, "height": 1080},   # 16:9 — YouTube long-form
+    "portrait": {"width": 1080, "height": 1920},    # 9:16 — Shorts/Reels/TikTok
+    "square": {"width": 1080, "height": 1080},      # 1:1
+}
 
-# Default fully-zoomed-out view — matches a 16:9 frame centered on the board.
-DEFAULT_VIEW = {"x": 0, "y": 0, "w": 1920, "h": 1080}
+
+def get_frame_dims(orientation: str = "landscape") -> dict:
+    if orientation not in FRAME_PRESETS:
+        raise ValueError(f"Unknown orientation '{orientation}', must be one of {list(FRAME_PRESETS)}")
+    return dict(FRAME_PRESETS[orientation])
+
+
+def get_board_dims(orientation: str = "landscape") -> dict:
+    frame = get_frame_dims(orientation)
+    return {"width": frame["width"] * 2, "height": frame["height"] * 2}
+
+
+def get_default_view(orientation: str = "landscape") -> dict:
+    frame = get_frame_dims(orientation)
+    return {"x": 0, "y": 0, "w": frame["width"], "h": frame["height"]}
+
+
+# Kept for any code that still imports these directly — now just the
+# landscape preset's values, matching the original defaults exactly.
+BOARD_WIDTH = FRAME_PRESETS["landscape"]["width"] * 2
+BOARD_HEIGHT = FRAME_PRESETS["landscape"]["height"] * 2
+DEFAULT_VIEW = get_default_view("landscape")
 
 
 @dataclass
@@ -97,11 +123,17 @@ def _fit_aspect(region: dict, target_aspect: float = 16 / 9) -> dict:
 
 class Camera:
     """Accumulates a sequence of CameraMove instructions into absolute
-    keyframes on a single timeline, starting from DEFAULT_VIEW."""
+    keyframes on a single timeline, starting from DEFAULT_VIEW (or the
+    orientation-specific default if `orientation` is given — this is
+    what makes zoom_out / aspect-fitting land on the CORRECT frame
+    shape for portrait/square output instead of always assuming 16:9)."""
 
-    def __init__(self, start_view: dict = None):
+    def __init__(self, start_view: dict = None, orientation: str = "landscape"):
+        self.orientation = orientation
+        self.default_view = get_default_view(orientation)
+        self.target_aspect = self.default_view["w"] / self.default_view["h"]
         self.keyframes: List[CameraKeyframe] = [
-            CameraKeyframe(t=0.0, ease="none", **(start_view or DEFAULT_VIEW))
+            CameraKeyframe(t=0.0, ease="none", **(start_view or self.default_view))
         ]
 
     def add(self, move: CameraMove, start_t: float):
@@ -112,9 +144,9 @@ class Camera:
         elif move.action in ("zoom_in", "pan"):
             if not move.region:
                 raise ValueError(f"camera action '{move.action}' requires a region")
-            target = _fit_aspect(region_for_bbox(move.region, move.padding))
+            target = _fit_aspect(region_for_bbox(move.region, move.padding), self.target_aspect)
         elif move.action == "zoom_out":
-            target = dict(DEFAULT_VIEW)
+            target = dict(self.default_view)
         else:
             raise ValueError(f"unknown camera action: {move.action}")
 
