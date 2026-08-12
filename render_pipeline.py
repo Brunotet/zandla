@@ -118,18 +118,58 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
     SLOT_W, SLOT_H = 500, 400
     COLS = max(2, board["width"] // SLOT_W)
     MARGIN = 100
+    MAX_ITEMS_PER_SLOT = 4
+
+    relevant = [b for b in beats if b["mode"] in ("draw", "write", "icon_word")]
+
+    # Pass 1: chunk CONSECUTIVE beats sharing the same group_id into one
+    # chunk. A beat with no group_id (or a group_id of None — the
+    # default for every existing script) is always its own chunk of
+    # size 1 — this is what keeps old scripts laying out EXACTLY as
+    # before, unchanged. Only beats an upstream planner explicitly
+    # tags with a shared group_id (e.g. "food [icon] + good [text]"
+    # sharing one visual space) get packed together.
+    chunks = []
+    i = 0
+    while i < len(relevant):
+        gid = relevant[i].get("group_id")
+        if gid is None:
+            chunks.append([relevant[i]])
+            i += 1
+            continue
+        j = i
+        chunk = []
+        while j < len(relevant) and relevant[j].get("group_id") == gid:
+            chunk.append(relevant[j])
+            j += 1
+        chunks.append(chunk)
+        i = j
 
     layout = {}
-    slot_i = 0
-    for beat in beats:
-        if beat["mode"] not in ("draw", "write"):
-            continue
+    for slot_i, chunk in enumerate(chunks):
         col = slot_i % COLS
         row = slot_i // COLS
-        x = MARGIN + col * SLOT_W
-        y = MARGIN + row * SLOT_H
-        layout[beat["beat_id"]] = {"x": x, "y": y, "w": SLOT_W - 80, "h": SLOT_H - 80}
-        slot_i += 1
+        base_x = MARGIN + col * SLOT_W
+        base_y = MARGIN + row * SLOT_H
+        full_w, full_h = SLOT_W - 80, SLOT_H - 80
+
+        items = chunk[:MAX_ITEMS_PER_SLOT]
+        n = len(items)
+        # n==1 (the old, default case) gets the exact same rect as
+        # before — no gap subtracted, so single-item slots are
+        # unaffected byte-for-byte.
+        gap = 20 if n > 1 else 0
+        cell_w = full_w / n
+        for k, b in enumerate(items):
+            layout[b["beat_id"]] = {
+                "x": base_x + k * cell_w, "y": base_y,
+                "w": cell_w - gap, "h": full_h,
+            }
+        # Safety net, not an expected path: a group bigger than
+        # MAX_ITEMS_PER_SLOT (planner should never emit this) reuses
+        # the last cell instead of crashing render.
+        for b in chunk[MAX_ITEMS_PER_SLOT:]:
+            layout[b["beat_id"]] = layout[items[-1]["beat_id"]]
     return layout
 
 
@@ -292,6 +332,75 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 region["h"] * 0.40,
                 min(font_size * 4.6, region["h"] * 0.85),
             )
+            beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
+
+            cam.add(CameraMove(action="zoom_in", region=region, duration=min(1.2, beat["end"] - beat["start"])),
+                    start_t=beat["start"])
+
+        elif beat["mode"] == "icon_word" and region:
+            # Left ~42% of this beat's region for the icon, right side
+            # for the short written label — NOT the full sentence, just
+            # the label field (e.g. concept_key="food", label="good").
+            gutter = region["w"] * 0.06
+            icon_w = region["w"] * 0.42
+            icon_region = {"x": region["x"], "y": region["y"], "w": icon_w, "h": region["h"]}
+            text_region = {
+                "x": region["x"] + icon_w + gutter, "y": region["y"],
+                "w": region["w"] - icon_w - gutter, "h": region["h"],
+            }
+            label = beat.get("label") or beat["text"]
+
+            asset_entry = resolve_beat_asset(beat, channel, illustration_cache_dir)
+            beat_out["asset"] = asset_entry
+            beat_out["region"] = region
+            print(f"[render_pipeline] beat_id={beat['beat_id']} icon_word concept_key={beat.get('concept_key')!r} "
+                  f"label={label!r} -> resolved: source={asset_entry.get('asset_source')}")
+
+            half = (beat["end"] - beat["start"]) / 2
+            sub_visuals = []
+
+            if asset_entry.get("draw_style") == "stroke_reveal":
+                svg_path = asset_entry["asset_ref"].get("path")
+                icon_path_info = svg_to_path.icon_to_path_d(svg_path, icon_region) if svg_path else None
+                if icon_path_info is None:
+                    raise RuntimeError(
+                        f"beat_id={beat['beat_id']}: icon_word concept_key resolved to an icon with "
+                        f"no usable <path> data — pick a different concept_key for this beat."
+                    )
+                sub_visuals.append({
+                    "beat_id": f"{beat['beat_id']}-icon",
+                    "subpaths": icon_path_info["subpaths"],
+                    "stroke_width": max(1.0, 5.0 / icon_path_info["scale"]),
+                    "path_transform": icon_path_info["transform"],
+                    "icon_group_id": f"icon-{beat.get('concept_key')}".replace(" ", "-"),
+                    "start": beat["start"],
+                    "end": beat["start"] + half,
+                    "min_reveal_duration": 0.6,
+                })
+            else:
+                # mask_wipe illustration fallback — no pen-stroke reveal available for this
+                # concept, so just place it directly; only the label gets the pen animation.
+                beat_out["illustration_path"] = asset_entry["asset_ref"].get("cached_path")
+                beat_out["illustration_region"] = icon_region
+
+            pad = 0.15
+            usable_w = text_region["w"] * (1 - 2 * pad)
+            usable_h = text_region["h"] * (1 - 2 * pad)
+            font_size = text_to_path.fit_font_size(label, usable_w, usable_h)
+            text_x = text_region["x"] + text_region["w"] * pad
+            text_y = text_region["y"] + text_region["h"] * pad
+            stroke_info = text_to_path.text_to_strokes(label, x=text_x, y=text_y, font_size=font_size)
+            sub_visuals.append({
+                "beat_id": f"{beat['beat_id']}-label",
+                "subpaths": stroke_info["subpaths"],
+                "stroke_width": max(1.5, font_size * 0.045),
+                "path_transform": None,
+                "start": beat["start"] + half,
+                "end": beat["end"],
+            })
+
+            beat_out["sub_visuals"] = sub_visuals
+            target_height = max(region["h"] * 0.40, min(font_size * 4.6, region["h"] * 0.85))
             beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
             cam.add(CameraMove(action="zoom_in", region=region, duration=min(1.2, beat["end"] - beat["start"])),

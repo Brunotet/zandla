@@ -18,10 +18,11 @@ import json
 import os
 from typing import Optional
 
-VALID_MODES = {"write", "draw", "point", "zoom_in", "zoom_out", "drag", "erase", "swipe", "talk"}
+VALID_MODES = {"write", "draw", "icon_word", "point", "zoom_in", "zoom_out", "drag", "erase", "swipe", "talk"}
 GESTURE_FOR_MODE = {
     "write": "write",
     "draw": "write",       # draw mode still uses the write/pen gesture, just targets an icon instead of text
+    "icon_word": "write",  # icon + short label, same pen gesture as draw/write
     "point": "point",
     "zoom_in": "pinch_in",   # resolves to the pinch_in -> pinch_out swap pair
     "zoom_out": "pinch_out",  # resolves to the pinch_out -> pinch_in swap pair
@@ -48,9 +49,15 @@ def validate_beat(beat: dict, index: int) -> None:
             f"must be one of {sorted(VALID_MODES)}"
         )
 
-    if beat["mode"] in ("draw", "point", "zoom_in", "zoom_out", "drag") and "concept_key" not in beat:
+    if beat["mode"] in ("draw", "icon_word", "point", "zoom_in", "zoom_out", "drag") and "concept_key" not in beat:
         raise BeatValidationError(
             f"beat[{index}] (id={beat['beat_id']}) mode='{beat['mode']}' requires a concept_key"
+        )
+
+    if beat["mode"] == "icon_word" and not str(beat.get("label", "")).strip():
+        raise BeatValidationError(
+            f"beat[{index}] (id={beat['beat_id']}) mode='icon_word' requires a non-empty 'label' "
+            f"(the short word/phrase written beside the icon, e.g. concept_key='food', label='good')"
         )
 
     if not beat["text"].strip():

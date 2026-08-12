@@ -306,6 +306,29 @@
 
   // ── Beat dispatch ─────────────────────────────────────────────────
   function scheduleBeat(beat) {
+    if (beat.mode === 'icon_word' && beat.sub_visuals && beat.hand) {
+      // 'food' icon + written word 'good' sharing one beat/region —
+      // both sub-visuals reuse the exact same stroke-reveal renderer
+      // draw/write already use, just called twice with the same
+      // hand so it reads as one continuous gesture.
+      const h = beat.hand;
+      if (beat.illustration_path && beat.illustration_region) {
+        const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+        img.setAttribute('x', beat.illustration_region.x);
+        img.setAttribute('y', beat.illustration_region.y);
+        img.setAttribute('width', beat.illustration_region.w);
+        img.setAttribute('height', beat.illustration_region.h);
+        img.setAttribute('href', beat.illustration_path);
+        contentLayer.appendChild(img);
+      }
+      beat.sub_visuals.forEach((sub) => {
+        animateStrokeReveal(sub, (px, py, angle) => {
+          const j = naturalJitter(performance.now() / 1000, h.h);
+          placeHandSprite(h.file, px + j.dx - h.anchor_x, py + j.dy - h.anchor_y, h.w, h.h, 0, px + j.dx, py + j.dy);
+        });
+      });
+      return;
+    }
     if (beat.mode === 'draw' && beat.illustration_path) {
       animateMaskWipe(beat);
       return;
