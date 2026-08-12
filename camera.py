@@ -66,7 +66,12 @@ DEFAULT_VIEW = get_default_view("landscape")
 
 @dataclass
 class CameraKeyframe:
-    t: float                 # seconds, absolute timeline position
+    t_start: float           # when this move may BEGIN (caller-controlled — must be
+                              # >= the moment the previous beat's content finished
+                              # being drawn, not just when the previous CAMERA move
+                              # arrived — those are not the same time, and confusing
+                              # them was the actual bug)
+    t_end: float              # when this move ARRIVES at (x,y,w,h)
     x: float
     y: float
     w: float
@@ -132,8 +137,9 @@ class Camera:
         self.orientation = orientation
         self.default_view = get_default_view(orientation)
         self.target_aspect = self.default_view["w"] / self.default_view["h"]
+        v = start_view or self.default_view
         self.keyframes: List[CameraKeyframe] = [
-            CameraKeyframe(t=0.0, ease="none", **(start_view or self.default_view))
+            CameraKeyframe(t_start=0.0, t_end=0.0, ease="none", **v)
         ]
 
     def add(self, move: CameraMove, start_t: float):
@@ -150,9 +156,16 @@ class Camera:
         else:
             raise ValueError(f"unknown camera action: {move.action}")
 
-        self.keyframes.append(CameraKeyframe(
-            t=start_t + move.duration, ease=move.ease, **target
-        ))
+        # Never start before the previous move finished ARRIVING (keeps
+        # moves strictly ordered) — the caller is responsible for
+        # passing a start_t that ALSO respects when the previous
+        # beat's content actually finished drawing (see
+        # render_pipeline.py's camera_free_at tracking); this max()
+        # is just a safety floor against overlapping camera tweens.
+        t_start = max(start_t, prev.t_end)
+        t_end = t_start + move.duration
+
+        self.keyframes.append(CameraKeyframe(t_start=t_start, t_end=t_end, ease=move.ease, **target))
         return self
 
     def value_at(self, t: float) -> dict:
@@ -160,20 +173,27 @@ class Camera:
         for a live GSAP-driven build (as start/end keyframe pairs it
         tweens between) and for a pure-Python frame-dump fallback."""
         kfs = self.keyframes
-        if t <= kfs[0].t:
+        if t <= kfs[0].t_end:
             k = kfs[0]
             return {"x": k.x, "y": k.y, "w": k.w, "h": k.h}
         for i in range(1, len(kfs)):
-            if t <= kfs[i].t:
-                a, b = kfs[i - 1], kfs[i]
-                span = b.t - a.t
-                progress = 0.0 if span <= 0 else (t - a.t) / span
-                progress = _ease(progress, b.ease)
+            k = kfs[i]
+            if t < k.t_start:
+                # Between moves — HOLD at the previous arrival point,
+                # don't interpolate toward the next move early. This
+                # is the actual behavior that was missing before.
+                prev = kfs[i - 1]
+                return {"x": prev.x, "y": prev.y, "w": prev.w, "h": prev.h}
+            if t <= k.t_end:
+                prev = kfs[i - 1]
+                span = k.t_end - k.t_start
+                progress = 0.0 if span <= 0 else (t - k.t_start) / span
+                progress = _ease(progress, k.ease)
                 return {
-                    "x": a.x + (b.x - a.x) * progress,
-                    "y": a.y + (b.y - a.y) * progress,
-                    "w": a.w + (b.w - a.w) * progress,
-                    "h": a.h + (b.h - a.h) * progress,
+                    "x": prev.x + (k.x - prev.x) * progress,
+                    "y": prev.y + (k.y - prev.y) * progress,
+                    "w": prev.w + (k.w - prev.w) * progress,
+                    "h": prev.h + (k.h - prev.h) * progress,
                 }
         k = kfs[-1]
         return {"x": k.x, "y": k.y, "w": k.w, "h": k.h}
@@ -182,13 +202,14 @@ class Camera:
         return f"{view['x']:.2f} {view['y']:.2f} {view['w']:.2f} {view['h']:.2f}"
 
     def gsap_keyframes_js(self) -> str:
-        """Emits a JS array of {t,x,y,w,h,ease} for the Playwright page
-        to consume directly with a GSAP timeline — avoids re-deriving
-        interpolation logic in JS; Python computed the keyframes, JS
-        just tweens between the ones adjacent to playback time."""
+        """Emits a JS array of {t_start,t_end,x,y,w,h,ease} for the
+        Playwright page to consume directly — each entry is scheduled
+        at its own explicit t_start (via GSAP's delay), NOT chained
+        off the previous entry's arrival time, so gaps between moves
+        become genuine holds instead of the camera drifting early."""
         import json
         return json.dumps([
-            {"t": k.t, "x": k.x, "y": k.y, "w": k.w, "h": k.h, "ease": k.ease}
+            {"t_start": k.t_start, "t_end": k.t_end, "x": k.x, "y": k.y, "w": k.w, "h": k.h, "ease": k.ease}
             for k in self.keyframes
         ])
 

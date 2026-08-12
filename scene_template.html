@@ -60,20 +60,25 @@
   function buildCameraTimeline(keyframes) {
     if (!keyframes || keyframes.length === 0) return;
     const cam = { x: keyframes[0].x, y: keyframes[0].y, w: keyframes[0].w, h: keyframes[0].h };
-    const tl = gsap.timeline();
+    worldEl.setAttribute('viewBox', `${cam.x} ${cam.y} ${cam.w} ${cam.h}`);
     for (let i = 1; i < keyframes.length; i++) {
       const kf = keyframes[i];
-      const prev = keyframes[i - 1];
-      tl.to(cam, {
+      // Each move is scheduled at its OWN t_start (via delay), not
+      // chained off the previous move's arrival — this is the actual
+      // fix for the camera drifting toward the next region while the
+      // current sentence was still being written. Between moves GSAP
+      // simply leaves `cam` at its last-set value, which is the hold
+      // behavior we want with zero extra code.
+      gsap.to(cam, {
         x: kf.x, y: kf.y, w: kf.w, h: kf.h,
-        duration: kf.t - prev.t,
+        duration: Math.max(0.01, kf.t_end - kf.t_start),
+        delay: kf.t_start,
         ease: kf.ease === 'none' ? 'none' : kf.ease,
         onUpdate: () => {
           worldEl.setAttribute('viewBox', `${cam.x} ${cam.y} ${cam.w} ${cam.h}`);
         },
-      }, prev.t);
+      });
     }
-    return tl;
   }
 
   // ── Stroke-reveal drawing (write/draw modes) ────────────────────

@@ -212,6 +212,16 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
     t_cursor = 0.0
     scene_beats = []
 
+    # The camera is only allowed to START a move once the CURRENTLY
+    # visible content has finished being drawn — not the instant the
+    # previous camera move arrived (that mismatch was the actual bug:
+    # a beat's own zoom-in only takes ~0.4s, but its text keeps
+    # writing for several more seconds after that, and the OLD code
+    # let the next beat's camera move start right after the zoom
+    # arrived, drifting away mid-sentence). Updated to beat["end"]
+    # after every beat with an active stroke-reveal or pinch gesture.
+    camera_free_at = 0.0
+
     # Maps concept_key -> the region it was drawn in, populated as we
     # process draw/write beats in order. point/zoom_in/zoom_out beats
     # don't get their own board slot (they reference something ALREADY
@@ -334,8 +344,10 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             )
             beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
-            cam.add(CameraMove(action="zoom_in", region=region, duration=min(1.2, beat["end"] - beat["start"])),
-                    start_t=beat["start"])
+            cam.add(CameraMove(action="zoom_in", region=region,
+                                duration=min(0.45, max(0.15, beat["end"] - beat["start"]))),
+                    start_t=camera_free_at)
+            camera_free_at = beat["end"]
 
         elif beat["mode"] == "icon_word" and region:
             # Left ~42% of this beat's region for the icon, right side
@@ -388,7 +400,15 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             usable_h = text_region["h"] * (1 - 2 * pad)
             font_size = text_to_path.fit_font_size(label, usable_w, usable_h)
             text_x = text_region["x"] + text_region["w"] * pad
-            text_y = text_region["y"] + text_region["h"] * pad
+            # VERTICALLY CENTERED, not top-anchored (region.y + h*pad) —
+            # the icon (icon_to_path_d) fits/centers itself within its
+            # own full-height region, so a top-anchored label sat well
+            # above the icon's actual center. font_size directly
+            # approximates the glyphs' total rendered height (Hershey
+            # data spans ~_NATIVE_Y_SPAN units, which font_size is
+            # scaled to) so this centers the label on the SAME
+            # vertical midpoint the icon is centered on.
+            text_y = text_region["y"] + (text_region["h"] - font_size) / 2
             stroke_info = text_to_path.text_to_strokes(label, x=text_x, y=text_y, font_size=font_size)
             sub_visuals.append({
                 "beat_id": f"{beat['beat_id']}-label",
@@ -403,8 +423,10 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             target_height = max(region["h"] * 0.40, min(font_size * 4.6, region["h"] * 0.85))
             beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
-            cam.add(CameraMove(action="zoom_in", region=region, duration=min(1.2, beat["end"] - beat["start"])),
-                    start_t=beat["start"])
+            cam.add(CameraMove(action="zoom_in", region=region,
+                                duration=min(0.45, max(0.15, beat["end"] - beat["start"]))),
+                    start_t=camera_free_at)
+            camera_free_at = beat["end"]
 
         elif beat["mode"] == "draw" and region:
             asset_entry = resolve_beat_asset(beat, channel, illustration_cache_dir)
@@ -453,8 +475,10 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 target_height = region["h"] * 0.95
                 beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
-            cam.add(CameraMove(action="zoom_in", region=region, duration=min(1.2, beat["end"] - beat["start"])),
-                    start_t=beat["start"])
+            cam.add(CameraMove(action="zoom_in", region=region,
+                                duration=min(0.45, max(0.15, beat["end"] - beat["start"]))),
+                    start_t=camera_free_at)
+            camera_free_at = beat["end"]
 
         elif beat["mode"] == "point" and region:
             target_x = region["x"] + region["w"] / 2
@@ -496,8 +520,9 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                     "duration": max(0.2, (beat["end"] - beat["start"]) / 2),
                 }
             cam.add(CameraMove(action=beat["mode"], region=region,
-                                duration=min(1.0, beat["end"] - beat["start"])),
-                    start_t=beat["start"])
+                                duration=min(1.0, max(0.15, beat["end"] - beat["start"]))),
+                    start_t=camera_free_at)
+            camera_free_at = beat["end"]
 
         elif beat["mode"] == "swipe":
             sweep = gesture_engine.scaled_swipe(
@@ -506,7 +531,8 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             )
             sweep["y"] = frame["height"] / 2 - sweep["anchor_y"]
             beat_out["hand_sweep"] = sweep
-            cam.add(CameraMove(action="zoom_out", duration=0.6), start_t=beat["start"])
+            cam.add(CameraMove(action="zoom_out", duration=0.6), start_t=camera_free_at)
+            camera_free_at = beat["end"]
 
         elif beat["mode"] == "talk":
             beat_out["cutaway_file"] = gesture_engine.cutaway_for_beat(beat["beat_id"])
