@@ -43,11 +43,34 @@ HERSHEY_JSON_PATH = os.path.join(os.path.dirname(__file__), "vendor", "fonts", "
 _NATIVE_Y_SPAN = 32.0
 
 
+_COORD_RE = re.compile(r"(-?\d+\.?\d*),(-?\d+\.?\d*)")
+
+
+def _real_max_x(d: str) -> float:
+    """The glyph's declared 'o' (advance width) is NOT reliable on its
+    own — measured directly against this font's data, several letters'
+    actual ink (e.g. 'r', 'm') extends well past their own 'o' value
+    (overhang). Advancing the cursor by 'o' alone under-spaces those
+    letters relative to ones whose ink stays inside their 'o' box,
+    which is what produced the "some letters packed, some letters
+    apart" bug — it wasn't random, it was per-glyph overhang. Real
+    max-x of the stroke coordinates is the actual right edge that must
+    clear before the next letter starts."""
+    xs = [float(m.group(1)) for m in _COORD_RE.finditer(d)]
+    return max(xs) if xs else 0.0
+
+
 @lru_cache(maxsize=1)
 def _load_font():
     with open(HERSHEY_JSON_PATH) as f:
         data = json.load(f)
-    return data["chars"]  # list of 95, index = ord(char) - 33
+    chars = data["chars"]
+    for c in chars:
+        # Precomputed once here (not per-occurrence at render time) —
+        # advance = whichever is bigger, the declared width or the
+        # real ink extent, so overhang letters get their true width.
+        c["_advance"] = max(c["o"], _real_max_x(c["d"]))
+    return chars  # list of 95, index = ord(char) - 33
 
 
 def _char_data(ch: str, chars: list):
@@ -78,8 +101,8 @@ def text_advance_width(text: str, font_size: float) -> float:
             total += font_size * 0.22
             continue
         c = _char_data(ch, chars)
-        advance = c["o"] if c else _NATIVE_Y_SPAN * 0.5
-        total += advance * scale + font_size * 0.2
+        advance = c["_advance"] if c else _NATIVE_Y_SPAN * 0.5
+        total += advance * scale + font_size * 0.05
     return total
 
 
@@ -161,12 +184,15 @@ def text_to_strokes(text: str, x: float, y: float, font_size: float) -> dict:
             transformed = re.sub(r"(-?\d+\.?\d*),(-?\d+\.?\d*)", _transform_coords, raw_sub)
             all_subpaths.append(transformed)
 
-        # Small extra breathing room between letters (matches the
-        # reference library's "charSpacingAdjust" mechanism) — pure
-        # advance-width spacing reads slightly crowded for cursive
-        # connecting strokes; a touch of extra gap keeps it readable
-        # without breaking the connected-cursive look.
-        cursor_x += c["o"] * scale + font_size * 0.2
+        # Advance by the REAL ink extent (c["_advance"], see
+        # _load_font), not the raw declared "o" — "o" alone let
+        # overhang-heavy letters (r, m, ...) collide into the next
+        # letter while other letters got comparatively too much gap.
+        # Small fixed breathing room on top is now much smaller (0.05
+        # instead of 0.2) since the overhang correction already closes
+        # most of the previous crowding-vs-gap inconsistency; this is
+        # just a touch of visual air, not a fix for spacing itself.
+        cursor_x += c["_advance"] * scale + font_size * 0.05
 
     _flush_word()
 

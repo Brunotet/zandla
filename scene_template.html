@@ -99,6 +99,22 @@
     // actually traces one real stroke, then the next, following each
     // stroke's real curve — not a synthetic wipe with no relationship
     // to the letter shapes.
+    // Icon beats get their paths parented under a stable <g id="icon-...">
+    // instead of straight into contentLayer — this is what a LATER
+    // zoom_in/zoom_out beat's icon_scale targets to grow/shrink THIS
+    // exact icon in place (see animateIconScale below). Text (write
+    // mode) beats have no icon_group_id and just append to
+    // contentLayer directly as before — unaffected.
+    let parent = contentLayer;
+    if (beat.icon_group_id) {
+      parent = document.getElementById(beat.icon_group_id);
+      if (!parent) {
+        parent = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        parent.id = beat.icon_group_id;
+        contentLayer.appendChild(parent);
+      }
+    }
+
     const pathEls = beat.subpaths.map((d) => {
       const el = document.createElementNS('http://www.w3.org/2000/svg', 'path');
       el.setAttribute('d', d);
@@ -112,7 +128,7 @@
       if (beat.path_transform) {
         el.setAttribute('transform', beat.path_transform);
       }
-      contentLayer.appendChild(el);
+      parent.appendChild(el);
       return el;
     });
 
@@ -254,6 +270,40 @@
     });
   }
 
+  // ── Icon enlarge (pinch in/out scales the ICON, not the camera) ──
+  // Targets the <g id="icon-<concept_key>"> created in
+  // animateStrokeReveal when that concept was originally drawn.
+  // Scales around (cx, cy) — the same world-space point the pinch
+  // hand is placed at — using the standard
+  // translate(cx,cy) scale(s) translate(-cx,-cy) pattern so the icon
+  // grows/shrinks in place instead of drifting off from its corner.
+  function animateIconScale(cfg) {
+    const el = document.getElementById(cfg.target_id);
+    if (!el) {
+      // Nothing drawn under this concept_key as an icon (e.g. it was
+      // a mask_wipe illustration, or the concept_key never matched) —
+      // the pinch hand still plays via hand_swap, just nothing to grow.
+      console.warn(`icon_scale: no element #${cfg.target_id} found, skipping`);
+      return;
+    }
+    const state = { s: 1 };
+    // Read back any existing scale (e.g. a zoom_out beat shrinking an
+    // icon a prior zoom_in already enlarged) rather than assuming 1.
+    const existing = el.getAttribute('data-icon-scale');
+    if (existing) state.s = parseFloat(existing);
+
+    gsap.to(state, {
+      s: cfg.scale,
+      duration: cfg.duration,
+      delay: cfg.swap_at,
+      ease: 'back.out(1.4)',
+      onUpdate: () => {
+        el.setAttribute('transform', `translate(${cfg.cx},${cfg.cy}) scale(${state.s}) translate(${-cfg.cx},${-cfg.cy})`);
+        el.setAttribute('data-icon-scale', state.s);
+      },
+    });
+  }
+
   // ── Beat dispatch ─────────────────────────────────────────────────
   function scheduleBeat(beat) {
     if (beat.mode === 'draw' && beat.illustration_path) {
@@ -283,6 +333,9 @@
         placeHandSprite(start.file, start.x, start.y, start.w, start.h, 0));
       gsap.delayedCall(swap_at, () =>
         placeHandSprite(end.file, end.x, end.y, end.w, end.h, 0));
+      if (beat.icon_scale) {
+        animateIconScale(beat.icon_scale);
+      }
     }
     // erase / swipe / talk dispatch follow the same delayedCall pattern — omitted in this
     // first pass for brevity, mechanism is identical to the cases above.

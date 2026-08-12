@@ -31,6 +31,11 @@ from beat_schema import validate_batch, load_vocabulary, GESTURE_FOR_MODE
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
+# How much bigger a pinched-in icon gets, relative to its original
+# drawn size. Tune this single number if "enlarge" should read as
+# more/less dramatic — nothing else needs to change.
+ICON_ENLARGE_SCALE = 1.9
+
 
 def _channel_library_path(channel: str) -> str:
     return os.path.join(REPO_ROOT, "channels", channel, "concept-library.json")
@@ -310,6 +315,11 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                         f"concept_key or extend svg_to_path.py to handle primitive shapes."
                     )
                 beat_out["subpaths"] = icon_path_info["subpaths"]
+                # Stable id so a LATER zoom_in/zoom_out beat referencing
+                # this same concept_key can find and scale THIS exact
+                # icon group in place (see icon_scale below) — separate
+                # from camera movement entirely.
+                beat_out["icon_group_id"] = f"icon-{beat.get('concept_key', beat['beat_id'])}".replace(" ", "-")
                 # Icons DO have a wrapping scale transform (unlike text,
                 # where scale is baked directly into coordinates) — a
                 # stroke-width attribute gets multiplied by that
@@ -350,12 +360,32 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             target_y = region["y"] + region["h"] / 2
             th = region["h"] * 0.5
             start_hand, end_hand = gesture_engine.zoom_swap_pair(direction=direction, target_height=th)
+            swap_at = (beat["start"] + beat["end"]) / 2
             beat_out["hand_swap"] = {
                 "start": start_hand.placement_at(target_x, target_y),
                 "end": end_hand.placement_at(target_x, target_y),
-                "swap_at": (beat["start"] + beat["end"]) / 2,
+                "swap_at": swap_at,
             }
             beat_out["region"] = region
+
+            # Enlarge/shrink the ICON ITSELF in place (separate from
+            # the camera move below) — targets the icon_group_id set
+            # when that concept_key was originally drawn. zoom_in grows
+            # it to ICON_ENLARGE_SCALE; zoom_out shrinks it back to 1x.
+            # If nothing with that concept_key was ever drawn as an
+            # icon (e.g. it was a mask_wipe illustration, which has no
+            # group id), this is silently skipped in the template —
+            # the pinch hand still plays, just without an icon to grow.
+            ck = beat.get("concept_key")
+            if ck:
+                beat_out["icon_scale"] = {
+                    "target_id": f"icon-{ck}".replace(" ", "-"),
+                    "cx": target_x,
+                    "cy": target_y,
+                    "scale": ICON_ENLARGE_SCALE if beat["mode"] == "zoom_in" else 1.0,
+                    "swap_at": swap_at,
+                    "duration": max(0.2, (beat["end"] - beat["start"]) / 2),
+                }
             cam.add(CameraMove(action=beat["mode"], region=region,
                                 duration=min(1.0, beat["end"] - beat["start"])),
                     start_t=beat["start"])
