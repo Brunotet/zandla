@@ -36,6 +36,43 @@ REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 # more/less dramatic — nothing else needs to change.
 ICON_ENLARGE_SCALE = 1.9
 
+# Camera pacing — NOT a fixed move duration. Real duration is derived
+# per-move from (a) how far the camera actually has to travel between
+# the previous target and this one, and (b) how much real slack exists
+# before this beat's own content needs to be on screen (beat["start"]
+# minus the moment the camera is actually free to move). These are
+# just the clamps: a hop should never feel instant, a full-board jump
+# should never crawl.
+CAMERA_MIN_DURATION = 0.22
+CAMERA_MAX_DURATION = 0.85
+CAMERA_TRAVEL_SPEED = 2600.0  # world-units/second
+
+
+def _camera_move_duration(prev_center, target_center, available_gap):
+    """prev_center/target_center: (x, y) world-space camera centers.
+    available_gap: seconds of real slack before this beat's content
+    needs to be visible (beat['start'] - camera_free_at), or None if
+    unknown. Distance-based pacing means a short hop between adjacent
+    slots is quick and a jump across the board takes noticeably
+    longer — proportional, not a flat number regardless of context."""
+    if prev_center is None:
+        return CAMERA_MIN_DURATION
+    dx = target_center[0] - prev_center[0]
+    dy = target_center[1] - prev_center[1]
+    dist = (dx * dx + dy * dy) ** 0.5
+    duration = max(CAMERA_MIN_DURATION, min(CAMERA_MAX_DURATION, dist / CAMERA_TRAVEL_SPEED))
+    if available_gap is not None and available_gap > 0:
+        # There's real slack (previous sentence finished early relative
+        # to this one's start) — never take longer than that slack, so
+        # the move still finishes before this beat's content needs to
+        # be framed.
+        duration = min(duration, max(CAMERA_MIN_DURATION, available_gap))
+    return duration
+
+
+def _region_center(region: dict) -> tuple:
+    return (region["x"] + region["w"] / 2, region["y"] + region["h"] / 2)
+
 
 def _channel_library_path(channel: str) -> str:
     return os.path.join(REPO_ROOT, "channels", channel, "concept-library.json")
@@ -221,6 +258,42 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
     # arrived, drifting away mid-sentence). Updated to beat["end"]
     # after every beat with an active stroke-reveal or pinch gesture.
     camera_free_at = 0.0
+    last_camera_center = _region_center(first_region) if first_region else None
+
+    def _apply_camera_move(beat_out_ref, beat_ref, region_ref, action, skip_transition=False):
+        """Moves the camera toward region_ref (or the default wide view
+        if region_ref is None, e.g. for 'swipe'). Duration is derived
+        from actual travel distance + real available slack (see
+        _camera_move_duration), not a flat constant. Also attaches a
+        swipe-hand 'camera_transition' that plays IN THE SAME DIRECTION
+        the camera pans, timed to the exact same window — masks the cut
+        the way a real hand sweeping past the lens would."""
+        nonlocal camera_free_at, last_camera_center
+        target_region = region_ref if region_ref is not None else cam.default_view
+        target_center = _region_center(target_region)
+        available_gap = beat_ref["start"] - camera_free_at
+        duration = _camera_move_duration(last_camera_center, target_center, available_gap)
+
+        cam.add(CameraMove(action=action, region=region_ref, duration=duration), start_t=camera_free_at)
+
+        if last_camera_center is not None and not skip_transition:
+            dx = target_center[0] - last_camera_center[0]
+            dy = target_center[1] - last_camera_center[1]
+            # Only spawn a transition hand for a move big enough to
+            # actually read as a cut — a tiny reframe within the same
+            # neighborhood shouldn't flash a hand across the screen.
+            if (dx * dx + dy * dy) ** 0.5 > 150:
+                direction = "rtl" if dx < 0 else "ltr"
+                sweep = gesture_engine.scaled_swipe(
+                    direction=direction, frame_width=frame["width"],
+                    target_height=int(frame["height"] * 0.3),
+                )
+                sweep["start"] = camera_free_at
+                sweep["duration"] = duration
+                beat_out_ref["camera_transition"] = sweep
+
+        camera_free_at = beat_ref["end"]
+        last_camera_center = target_center
 
     # Maps concept_key -> the region it was drawn in, populated as we
     # process draw/write beats in order. point/zoom_in/zoom_out beats
@@ -344,10 +417,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             )
             beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
-            cam.add(CameraMove(action="zoom_in", region=region,
-                                duration=min(0.45, max(0.15, beat["end"] - beat["start"]))),
-                    start_t=camera_free_at)
-            camera_free_at = beat["end"]
+            _apply_camera_move(beat_out, beat, region, "zoom_in")
 
         elif beat["mode"] == "icon_word" and region:
             # Left ~42% of this beat's region for the icon, right side
@@ -391,9 +461,16 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 })
             else:
                 # mask_wipe illustration fallback — no pen-stroke reveal available for this
-                # concept, so just place it directly; only the label gets the pen animation.
+                # concept. FIXED: previously placed instantly with no reveal timing and no
+                # hand at all — now wipes in during the icon's own half of the beat, with a
+                # 'drag' hand tracking the reveal edge, matching the draw-mode fix.
                 beat_out["illustration_path"] = asset_entry["asset_ref"].get("cached_path")
                 beat_out["illustration_region"] = icon_region
+                beat_out["illustration_start"] = beat["start"]
+                beat_out["illustration_end"] = beat["start"] + half
+                beat_out["mask_wipe_hand"] = gesture_engine.scaled_hand(
+                    "drag", target_height=icon_region["h"] * 0.5
+                ).to_dict()
 
             pad = 0.15
             usable_w = text_region["w"] * (1 - 2 * pad)
@@ -423,10 +500,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             target_height = max(region["h"] * 0.40, min(font_size * 4.6, region["h"] * 0.85))
             beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
-            cam.add(CameraMove(action="zoom_in", region=region,
-                                duration=min(0.45, max(0.15, beat["end"] - beat["start"]))),
-                    start_t=camera_free_at)
-            camera_free_at = beat["end"]
+            _apply_camera_move(beat_out, beat, region, "zoom_in")
 
         elif beat["mode"] == "draw" and region:
             asset_entry = resolve_beat_asset(beat, channel, illustration_cache_dir)
@@ -463,7 +537,17 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 beat_out["path_transform"] = icon_path_info["transform"]
             else:
                 # mask_wipe illustration — no path data, template reveals via clip-path sweep instead.
+                # BUG FIXED: this branch never set a hand at all before — confirmed in the
+                # code (the hand assignment below only fires when "subpaths" is present) —
+                # which is exactly the hand-less icon in the screenshot. Now gets a 'drag'
+                # gesture that tracks the reveal edge.
                 beat_out["illustration_path"] = asset_entry["asset_ref"].get("cached_path")
+                beat_out["illustration_region"] = region
+                beat_out["illustration_start"] = beat["start"]
+                beat_out["illustration_end"] = beat["end"]
+                beat_out["mask_wipe_hand"] = gesture_engine.scaled_hand(
+                    "drag", target_height=region["h"] * 0.5
+                ).to_dict()
 
             if "subpaths" in beat_out or "path_d" in beat_out:
                 # target_height proportional to region size for icons — a hand
@@ -475,10 +559,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 target_height = region["h"] * 0.95
                 beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
-            cam.add(CameraMove(action="zoom_in", region=region,
-                                duration=min(0.45, max(0.15, beat["end"] - beat["start"]))),
-                    start_t=camera_free_at)
-            camera_free_at = beat["end"]
+            _apply_camera_move(beat_out, beat, region, "zoom_in")
 
         elif beat["mode"] == "point" and region:
             target_x = region["x"] + region["w"] / 2
@@ -519,10 +600,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                     "swap_at": swap_at,
                     "duration": max(0.2, (beat["end"] - beat["start"]) / 2),
                 }
-            cam.add(CameraMove(action=beat["mode"], region=region,
-                                duration=min(1.0, max(0.15, beat["end"] - beat["start"]))),
-                    start_t=camera_free_at)
-            camera_free_at = beat["end"]
+            _apply_camera_move(beat_out, beat, region, beat["mode"])
 
         elif beat["mode"] == "swipe":
             sweep = gesture_engine.scaled_swipe(
@@ -530,9 +608,10 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 frame_width=frame["width"], target_height=280,
             )
             sweep["y"] = frame["height"] / 2 - sweep["anchor_y"]
+            sweep["start"] = camera_free_at
+            sweep["duration"] = max(0.4, beat["end"] - beat["start"])
             beat_out["hand_sweep"] = sweep
-            cam.add(CameraMove(action="zoom_out", duration=0.6), start_t=camera_free_at)
-            camera_free_at = beat["end"]
+            _apply_camera_move(beat_out, beat, None, "zoom_out", skip_transition=True)
 
         elif beat["mode"] == "talk":
             beat_out["cutaway_file"] = gesture_engine.cutaway_for_beat(beat["beat_id"])

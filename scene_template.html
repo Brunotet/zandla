@@ -28,6 +28,11 @@
       <g id="hand-layer"></g>
     </svg>
     <div id="caption-layer"></div>
+    <!-- Screen-space, NOT inside the SVG world — a camera-transition
+         swipe hand needs to read as a constant on-screen size and
+         speed regardless of how zoomed-in the world viewBox currently
+         is, the same reason caption-layer sits out here. -->
+    <div id="transition-layer" style="position:absolute; inset:0; overflow:hidden; pointer-events:none;"></div>
   </div>
 
   <script src="vendor/js/gsap.min.js"></script>
@@ -55,6 +60,7 @@
   const contentLayer = document.getElementById('content-layer');
   const handLayer = document.getElementById('hand-layer');
   const captionLayer = document.getElementById('caption-layer');
+  const transitionLayer = document.getElementById('transition-layer');
 
   // ── Camera: drives the SVG viewBox directly, see camera.py for why ──
   function buildCameraTimeline(keyframes) {
@@ -245,9 +251,12 @@
 
   // ── Illustration reveal (mask_wipe — no stroke path, CLIP-matched
   // stock illustration instead. See asset_resolver.py fallback tier.) ──
-  function animateMaskWipe(beat) {
-    const region = beat.region;
-    const clipId = `clip-${beat.beat_id}`;
+  function animateMaskWipe(cfg) {
+    const region = cfg.illustration_region || cfg.region;
+    const start = cfg.illustration_start !== undefined ? cfg.illustration_start : cfg.start;
+    const end = cfg.illustration_end !== undefined ? cfg.illustration_end : cfg.end;
+    const duration = Math.max(0.05, end - start);
+    const clipId = `clip-${cfg.beat_id}`;
     const clip = document.createElementNS('http://www.w3.org/2000/svg', 'clipPath');
     clip.setAttribute('id', clipId);
     const clipRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
@@ -263,15 +272,50 @@
     img.setAttribute('y', region.y);
     img.setAttribute('width', region.w);
     img.setAttribute('height', region.h);
-    img.setAttribute('href', beat.illustration_path);
+    img.setAttribute('href', cfg.illustration_path);
     img.setAttribute('clip-path', `url(#${clipId})`);
     contentLayer.appendChild(img);
 
+    // FIXED: mask_wipe illustrations previously had NO hand at all —
+    // confirmed bug (an icon just fading/wiping in with nothing
+    // 'drawing' it). A 'drag' gesture now tracks the reveal edge, so
+    // it reads as a hand bringing the image into view.
+    const h = cfg.mask_wipe_hand;
     gsap.to(clipRect, {
       attr: { width: region.w },
-      duration: beat.end - beat.start,
-      delay: beat.start,
+      duration,
+      delay: start,
       ease: 'power1.out',
+      onUpdate: h ? function () {
+        const w = parseFloat(clipRect.getAttribute('width')) || 0;
+        const px = region.x + w;
+        const py = region.y + region.h / 2;
+        const j = naturalJitter(performance.now() / 1000, h.h);
+        placeHandSprite(h.file, px + j.dx - h.anchor_x, py + j.dy - h.anchor_y, h.w, h.h, 0, px + j.dx, py + j.dy);
+      } : undefined,
+    });
+  }
+
+  // ── Swipe hand — full-board clear OR a camera-transition cut ─────
+  // Screen-space (transitionLayer), not SVG world-space — a
+  // camera-transition swipe needs to read at a constant size/speed
+  // regardless of current zoom, same reasoning as caption-layer.
+  function animateSweepHand(sweep) {
+    const img = document.createElement('img');
+    img.src = `assets/hands/${sweep.file}`;
+    img.style.position = 'absolute';
+    img.style.top = `${sweep.y}px`;
+    img.style.width = `${sweep.w}px`;
+    img.style.height = `${sweep.h}px`;
+    if (sweep.mirror) img.style.transform = 'scaleX(-1)';
+    img.style.left = `${sweep.start_x}px`;
+    transitionLayer.appendChild(img);
+    gsap.to(img.style, {
+      left: `${sweep.end_x}px`,
+      duration: Math.max(0.1, sweep.duration),
+      delay: sweep.start,
+      ease: 'power1.inOut',
+      onComplete: () => img.remove(),
     });
   }
 
@@ -318,13 +362,7 @@
       // hand so it reads as one continuous gesture.
       const h = beat.hand;
       if (beat.illustration_path && beat.illustration_region) {
-        const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
-        img.setAttribute('x', beat.illustration_region.x);
-        img.setAttribute('y', beat.illustration_region.y);
-        img.setAttribute('width', beat.illustration_region.w);
-        img.setAttribute('height', beat.illustration_region.h);
-        img.setAttribute('href', beat.illustration_path);
-        contentLayer.appendChild(img);
+        animateMaskWipe(beat);
       }
       beat.sub_visuals.forEach((sub) => {
         animateStrokeReveal(sub, (px, py, angle) => {
@@ -364,9 +402,22 @@
       if (beat.icon_scale) {
         animateIconScale(beat.icon_scale);
       }
+    } else if (beat.mode === 'swipe' && beat.hand_sweep) {
+      // FIXED: this was never actually dispatched before — swipe mode
+      // set hand_sweep data but nothing in the template ever read it.
+      animateSweepHand(beat.hand_sweep);
     }
-    // erase / swipe / talk dispatch follow the same delayedCall pattern — omitted in this
-    // first pass for brevity, mechanism is identical to the cases above.
+  }
+
+  // Camera-transition swipe hand fires on ANY beat that got one
+  // (see render_pipeline.py's _apply_camera_move) — independent of
+  // beat.mode, since it's about the CAMERA CUT into this beat, not
+  // the beat's own drawing action. Runs alongside whatever else
+  // scheduleBeat above does for this beat.
+  function scheduleCameraTransition(beat) {
+    if (beat.camera_transition) {
+      animateSweepHand(beat.camera_transition);
+    }
   }
 
   // ── Boot ────────────────────────────────────────────────────────
@@ -384,6 +435,7 @@
 
     buildCameraTimeline(scene.camera_keyframes);
     scene.beats.forEach(scheduleBeat);
+    scene.beats.forEach(scheduleCameraTransition);
   }).catch((err) => {
     // Loud, not silent — this exact failure mode (fetch of a file://
     // path failing silently) is what produced a blank first render.
