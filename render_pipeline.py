@@ -152,7 +152,23 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
     taller columns for portrait; more, wider ones for landscape.
     """
     board = get_board_dims(orientation)
-    SLOT_W, SLOT_H = 500, 400
+    frame = get_frame_dims(orientation)
+    target_aspect = frame["width"] / frame["height"]
+    SLOT_W = 500
+    CONTENT_W, CONTENT_H = SLOT_W - 80, 400 - 80  # unchanged content box size for a single-item slot
+
+    # ROW SPACING BUG (confirmed, not assumed): the camera fits each
+    # slot to the OUTPUT aspect ratio (see camera.py's _fit_aspect),
+    # which for portrait video inflates the framed height to ~960px
+    # around a 420x320 content box — but rows were spaced a flat
+    # 400px apart regardless of orientation. That means the camera's
+    # actual shot for ANY single beat already spanned into the row
+    # above and below it. SLOT_H is now derived from what the camera
+    # will really frame, plus a safety margin, so adjacent rows are
+    # never inside the same shot.
+    fitted = _fit_aspect(region_for_bbox({"x": 0, "y": 0, "w": CONTENT_W, "h": CONTENT_H}, padding=60), target_aspect)
+    SLOT_H = max(400, fitted["h"] + 140)
+
     COLS = max(2, board["width"] // SLOT_W)
     MARGIN = 100
     MAX_ITEMS_PER_SLOT = 4
@@ -188,7 +204,7 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
         row = slot_i // COLS
         base_x = MARGIN + col * SLOT_W
         base_y = MARGIN + row * SLOT_H
-        full_w, full_h = SLOT_W - 80, SLOT_H - 80
+        full_w, full_h = CONTENT_W, CONTENT_H
 
         items = chunk[:MAX_ITEMS_PER_SLOT]
         n = len(items)
@@ -283,13 +299,42 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             # actually read as a cut — a tiny reframe within the same
             # neighborhood shouldn't flash a hand across the screen.
             if (dx * dx + dy * dy) ** 0.5 > 150:
-                direction = "rtl" if dx < 0 else "ltr"
-                sweep = gesture_engine.scaled_swipe(
-                    direction=direction, frame_width=frame["width"],
-                    target_height=int(frame["height"] * 0.3),
-                )
-                sweep["start"] = camera_free_at
-                sweep["duration"] = duration
+                # DIRECTION FIXED — this was backwards before. Spec:
+                # camera pans left -> hand sweeps LEFT-TO-RIGHT,
+                # camera pans right -> hand sweeps RIGHT-TO-LEFT,
+                # camera pans down -> hand sweeps DOWN-TO-UP (and the
+                # symmetric case up -> hand sweeps up-to-down).
+                # Whichever axis the camera moved MORE on is the one
+                # that sweeps (a diagonal row-wrap move picks its
+                # dominant axis rather than doing both at once).
+                if abs(dx) >= abs(dy):
+                    direction = "ltr" if dx < 0 else "rtl"
+                    sweep = gesture_engine.scaled_swipe(
+                        direction=direction, frame_width=frame["width"],
+                        target_height=int(frame["height"] * 0.3),
+                    )
+                else:
+                    direction = "btt" if dy > 0 else "ttb"
+                    sweep = gesture_engine.scaled_swipe(
+                        direction=direction, frame_width=frame["width"],
+                        frame_height=frame["height"],
+                        target_height=int(frame["width"] * 0.3),
+                    )
+                # SPEED FIXED — the hand always travels the full
+                # off-screen-to-off-screen distance regardless of how
+                # far the camera itself panned (which could be a very
+                # short, fast move). Sharing the camera's own duration
+                # made the hand look like a blur relative to the
+                # distance it covered. It now gets its own readable
+                # minimum duration, but is still anchored to arrive at
+                # EXACTLY the same instant the camera does (start time
+                # shifted earlier if needed), so it still genuinely
+                # "matches" the camera move rather than just being a
+                # fixed constant with no relationship to it.
+                move_arrival = camera_free_at + duration
+                sweep_duration = max(0.5, duration)
+                sweep["start"] = move_arrival - sweep_duration
+                sweep["duration"] = sweep_duration
                 beat_out_ref["camera_transition"] = sweep
 
         camera_free_at = beat_ref["end"]
@@ -334,16 +379,25 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             # data (see text_to_path.py docstring for why this replaced
             # the earlier filled-font approach) — computed deterministically
             # in Python, no font loading or generative step at render time.
-            pad = 0.15
+            #
+            # FIXED: was single-line only (fit_font_size) — for a long
+            # sentence that function had no way to fit the width except
+            # shrinking all the way to a hard 14px floor, and then STILL
+            # overflowing past max_width because nothing ever wrapped it
+            # to a second line. Now wraps across as many lines as needed
+            # and picks the largest font that still fits vertically.
+            pad = 0.12
             usable_w = region["w"] * (1 - 2 * pad)
             usable_h = region["h"] * (1 - 2 * pad)
-            font_size = text_to_path.fit_font_size(beat["text"], usable_w, usable_h)
+            font_size = text_to_path.fit_font_size_wrapped(beat["text"], usable_w, usable_h)
             text_x = region["x"] + region["w"] * pad
             text_y = region["y"] + region["h"] * pad
-            stroke_info = text_to_path.text_to_strokes(beat["text"], x=text_x, y=text_y, font_size=font_size)
+            stroke_info = text_to_path.text_to_strokes_wrapped(
+                beat["text"], x=text_x, y=text_y, font_size=font_size, max_width=usable_w
+            )
             print(f"[render_pipeline] beat_id={beat['beat_id']} write mode: text={beat['text']!r} "
-                  f"font_size={font_size:.1f} region={region} -> {len(stroke_info['subpaths'])} subpaths, "
-                  f"{len(stroke_info['word_groups'])} words, text_width={stroke_info['width']:.1f}")
+                  f"font_size={font_size:.1f} lines={stroke_info['line_count']} region={region} -> "
+                  f"{len(stroke_info['subpaths'])} subpaths, {len(stroke_info['word_groups'])} words")
 
             beat_out["subpaths"] = stroke_info["subpaths"]
             # Stroke width proportional to font_size, NOT a fixed pixel
@@ -452,7 +506,14 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 sub_visuals.append({
                     "beat_id": f"{beat['beat_id']}-icon",
                     "subpaths": icon_path_info["subpaths"],
-                    "stroke_width": max(1.0, 5.0 / icon_path_info["scale"]),
+                    # THICKNESS BUG FIXED: this had no upper bound before.
+                    # 5.0/scale is meant to compensate so icons read at a
+                    # consistent ~5px visual stroke regardless of size —
+                    # but with no ceiling, a smaller fitted region (e.g.
+                    # inside a grouped sub-cell) drives scale down and
+                    # this ratio up UNBOUNDED, producing visibly thicker
+                    # strokes on smaller icons. Clamped.
+                    "stroke_width": max(1.0, min(3.5, 5.0 / icon_path_info["scale"])),
                     "path_transform": icon_path_info["transform"],
                     "icon_group_id": f"icon-{beat.get('concept_key')}".replace(" ", "-"),
                     "start": beat["start"],
@@ -532,7 +593,11 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 # consistent ~5px VISUAL width regardless of how much
                 # the icon itself got scaled up/down, divide by that
                 # same scale factor here.
-                beat_out["stroke_width"] = max(1.0, 5.0 / icon_path_info["scale"])
+                # THICKNESS BUG FIXED: no upper bound before — a
+                # smaller fitted region (e.g. a grouped sub-cell) drove
+                # this ratio up unbounded, producing visibly thicker
+                # strokes on smaller icons. Clamped.
+                beat_out["stroke_width"] = max(1.0, min(3.5, 5.0 / icon_path_info["scale"]))
                 beat_out["min_reveal_duration"] = 1.3
                 beat_out["path_transform"] = icon_path_info["transform"]
             else:

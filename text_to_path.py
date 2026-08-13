@@ -106,6 +106,72 @@ def text_advance_width(text: str, font_size: float) -> float:
     return total
 
 
+def _wrap_lines(text: str, font_size: float, max_width: float) -> list:
+    """Greedy word-wrap using the SAME advance-width measurement the
+    renderer actually uses (text_advance_width), so a line that fits
+    here is guaranteed to actually fit on screen at this font_size."""
+    words = text.split(" ")
+    lines = []
+    current = []
+    for w in words:
+        trial = " ".join(current + [w])
+        if not current or text_advance_width(trial, font_size) <= max_width:
+            current.append(w)
+        else:
+            lines.append(" ".join(current))
+            current = [w]
+    if current:
+        lines.append(" ".join(current))
+    return lines
+
+
+def fit_font_size_wrapped(text: str, max_width: float, max_height: float,
+                           min_size: float = 20, max_size: float = 160) -> float:
+    """Finds the LARGEST font size where the text — WRAPPED across
+    as many lines as needed — fits inside max_width x max_height.
+    This is what fit_font_size (single-line only) was missing: for a
+    long sentence, that function had no choice but to shrink all the
+    way to its hard floor and then overflow past max_width anyway,
+    since nothing ever wrapped it to a second line. Multi-line means
+    the font can stay much bigger for the same sentence."""
+    line_height_ratio = 1.35
+    size = max_size
+    step = 3
+    while size > min_size:
+        lines = _wrap_lines(text, size, max_width)
+        total_h = len(lines) * size * line_height_ratio
+        if total_h <= max_height:
+            return size
+        size -= step
+    return min_size
+
+
+def text_to_strokes_wrapped(text: str, x: float, y: float, font_size: float, max_width: float) -> dict:
+    """Same return shape as text_to_strokes (subpaths + word_groups),
+    but lays the text out across multiple lines instead of forcing
+    everything onto one — word_groups indices stay contiguous and in
+    reading order across the line break, so render_pipeline.py's
+    per-word Chatterbox timing sync still zips correctly regardless
+    of how many lines the sentence wrapped into."""
+    lines = _wrap_lines(text, font_size, max_width)
+    line_height = font_size * 1.35
+    all_subpaths = []
+    word_groups = []
+    cursor_y = y
+    for line in lines:
+        result = text_to_strokes(line, x=x, y=cursor_y, font_size=font_size)
+        offset = len(all_subpaths)
+        for wg in result["word_groups"]:
+            word_groups.append({
+                "word": wg["word"],
+                "subpath_start": wg["subpath_start"] + offset,
+                "subpath_end": wg["subpath_end"] + offset,
+            })
+        all_subpaths.extend(result["subpaths"])
+        cursor_y += line_height
+    return {"subpaths": all_subpaths, "word_groups": word_groups, "line_count": len(lines)}
+
+
 def fit_font_size(text: str, max_width: float, max_height: float,
                    min_size: float = 14, max_size: float = 160) -> float:
     probe_size = 100.0

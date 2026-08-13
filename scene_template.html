@@ -136,6 +136,15 @@
       // transform), since a single fixed width was wrong for both at
       // once. Falls back to 4 only if somehow missing.
       el.style.strokeWidth = beat.stroke_width || 4;
+      if (beat.icon_group_id) {
+        // Icons can later be pinch-enlarged (icon_scale) via a
+        // transform:scale() on their parent <g> — without this, the
+        // stroke width would ALSO get multiplied by that scale,
+        // making an enlarged icon look progressively thicker on top
+        // of its own size increase. non-scaling-stroke keeps the
+        // line weight constant regardless of the group's transform.
+        el.setAttribute('vector-effect', 'non-scaling-stroke');
+      }
       if (beat.path_transform) {
         el.setAttribute('transform', beat.path_transform);
       }
@@ -304,19 +313,32 @@
     const img = document.createElement('img');
     img.src = `assets/hands/${sweep.file}`;
     img.style.position = 'absolute';
-    img.style.top = `${sweep.y}px`;
     img.style.width = `${sweep.w}px`;
     img.style.height = `${sweep.h}px`;
     if (sweep.mirror) img.style.transform = 'scaleX(-1)';
-    img.style.left = `${sweep.start_x}px`;
     transitionLayer.appendChild(img);
-    gsap.to(img.style, {
-      left: `${sweep.end_x}px`,
-      duration: Math.max(0.1, sweep.duration),
-      delay: sweep.start,
-      ease: 'power1.inOut',
-      onComplete: () => img.remove(),
-    });
+
+    if (sweep.axis === 'y') {
+      img.style.left = `${sweep.anchor_x !== undefined ? sweep.anchor_x : 0}px`;
+      img.style.top = `${sweep.start_y}px`;
+      gsap.to(img.style, {
+        top: `${sweep.end_y}px`,
+        duration: Math.max(0.1, sweep.duration),
+        delay: Math.max(0, sweep.start),
+        ease: 'power1.inOut',
+        onComplete: () => img.remove(),
+      });
+    } else {
+      img.style.top = `${sweep.y !== undefined ? sweep.y : 0}px`;
+      img.style.left = `${sweep.start_x}px`;
+      gsap.to(img.style, {
+        left: `${sweep.end_x}px`,
+        duration: Math.max(0.1, sweep.duration),
+        delay: Math.max(0, sweep.start),
+        ease: 'power1.inOut',
+        onComplete: () => img.remove(),
+      });
+    }
   }
 
   // ── Icon enlarge (pinch in/out scales the ICON, not the camera) ──

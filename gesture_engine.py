@@ -109,22 +109,41 @@ def scaled_erase_zone(target_height: float = DEFAULT_TARGET_HEIGHT) -> dict:
     }
 
 
-def scaled_swipe(direction: str, frame_width: float, target_height: float = DEFAULT_TARGET_HEIGHT) -> dict:
-    """Full-canvas clear. direction: 'ltr' or 'rtl'."""
+def scaled_swipe(direction: str, frame_width: float, target_height: float = DEFAULT_TARGET_HEIGHT,
+                  frame_height: float = None) -> dict:
+    """Full-canvas clear or camera-transition sweep.
+    direction: 'ltr'/'rtl' (horizontal) or 'ttb'/'btt' (vertical —
+    requires frame_height, used when the camera pans between rows
+    rather than between columns)."""
     g = GESTURES["swipe"]
     native_w, native_h = g["native_size"]
     scale = target_height / native_h
     final_w = native_w * scale
     af = g["anchor_frac"]
-    anchor_y = af["y"] * target_height
-    if direction == "ltr":
-        start_x, end_x = -final_w, frame_width
-    else:
-        start_x, end_x = frame_width, -final_w
+
+    if direction in ("ltr", "rtl"):
+        anchor_y = af["y"] * target_height
+        if direction == "ltr":
+            start_x, end_x = -final_w, frame_width
+        else:
+            start_x, end_x = frame_width, -final_w
+        return {
+            "file": g["file"], "mirror": direction == "rtl", "axis": "x",
+            "start_x": start_x, "end_x": end_x,
+            "w": final_w, "h": target_height, "anchor_y": anchor_y,
+        }
+
+    if frame_height is None:
+        raise ValueError("scaled_swipe: frame_height is required for vertical directions ('ttb'/'btt')")
+    anchor_x = af.get("x", 0.5) * final_w
+    if direction == "btt":
+        start_y, end_y = frame_height, -target_height
+    else:  # ttb
+        start_y, end_y = -target_height, frame_height
     return {
-        "file": g["file"], "mirror": direction == "rtl",
-        "start_x": start_x, "end_x": end_x,
-        "w": final_w, "h": target_height, "anchor_y": anchor_y,
+        "file": g["file"], "mirror": False, "axis": "y",
+        "start_y": start_y, "end_y": end_y,
+        "w": final_w, "h": target_height, "anchor_x": anchor_x,
     }
 
 
