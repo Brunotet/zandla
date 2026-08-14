@@ -35,9 +35,14 @@ REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 # drawn size. Tune this single number if "enlarge" should read as
 # more/less dramatic — nothing else needs to change.
 ICON_ENLARGE_SCALE = 1.45  # reduced from 1.9 — was overflowing off-canvas on pinch-enlarge
-ICON_STROKE_TARGET_PX = 45.0  # numerator for scale-compensated stroke width (stroke_width =
-                               # this / icon_path_info["scale"]) — tuned to land near "puzzle
-                               # icon" thickness, moderately increased from the original 5.0.
+ICON_STROKE_TARGET_PX = 16.0  # numerator for scale-compensated stroke width (stroke_width =
+                               # this / icon_path_info["scale"]) — apparent on-screen stroke
+                               # width in world-space px. Was 45.0 (9x this): the "thick during
+                               # reveal, thin right after" JUMP was fixed separately (see
+                               # stroke_width_final below), but the raw target itself never got
+                               # brought back down, so both states just rendered at the same
+                               # too-thick 45px uniformly. 16 is a starting point, not a proven
+                               # number — nudge it if it still doesn't look right.
                                # Wide clamp applied at each usage site, not a tight band.
 
 # Camera pacing — NOT a fixed move duration. Real duration is derived
@@ -561,7 +566,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                     # applied AFTER the reveal finishes, not during it.
                     # Wide safety clamp, not a tight band — a tight clamp
                     # was what caused inconsistent results before.
-                    "stroke_width": max(1.5, min(7.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"])),
+                    "stroke_width": max(1.5, min(5.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"])),
                     # BUG FOUND AND FIXED: switching to non-scaling-stroke
                     # after the reveal, WITHOUT also updating the numeric
                     # stroke-width value, meant the SAME number suddenly
@@ -571,12 +576,21 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                     # bug. stroke_width_final is the equivalent absolute
                     # width, applied at the SAME moment non-scaling-stroke
                     # is — same visual thickness, no jump.
-                    "stroke_width_final": max(1.5, min(7.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"])) * icon_path_info["scale"],
+                    "stroke_width_final": max(1.5, min(5.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"])) * icon_path_info["scale"],
                     "path_transform": icon_path_info["transform"],
                     "icon_group_id": icon_group_id,
                     "start": beat["start"],
                     "end": beat["start"] + half,
-                    "min_reveal_duration": 0.6,
+                    # BUFFERED, same reasoning as write-mode's BUFFER_SECONDS
+                    # below: 0.6 was a flat constant with no relationship to
+                    # `half` (this icon's actual on-screen window). When a
+                    # beat's narration was short, `half` could be well under
+                    # 0.6s, so the reveal was STILL RUNNING past its own
+                    # window when the next camera move / swipe fired —
+                    # exactly the "swipe hand pops up while the drawing hand
+                    # is still drawing" bug. Clamped to finish with a small
+                    # buffer before `half` always, never longer than 0.6.
+                    "min_reveal_duration": min(0.6, max(0.25, half - 0.15)),
                 })
             else:
                 # mask_wipe illustration fallback — no pen-stroke reveal available for this
@@ -654,13 +668,25 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 # non-scaling-stroke is applied only AFTER the reveal
                 # completes, purely to protect against a later
                 # pinch-enlarge, not during the dasharray animation.
-                _icon_stroke_w = max(1.5, min(7.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"]))
+                _icon_stroke_w = max(1.5, min(5.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"]))
                 beat_out["stroke_width"] = _icon_stroke_w
                 # Equivalent absolute width for non-scaling-stroke,
                 # applied at the same moment — fixes the thick-then-
                 # thin jump right after the reveal finishes.
                 beat_out["stroke_width_final"] = _icon_stroke_w * icon_path_info["scale"]
-                beat_out["min_reveal_duration"] = 1.3
+                # BUFFERED, same reasoning as write-mode's BUFFER_SECONDS
+                # above and the icon_word fix (see comment there): 1.3 was a
+                # flat constant with no relationship to this beat's actual
+                # (beat.end - beat.start) window, which is driven by real
+                # narration length. A short-narration draw beat let the icon
+                # still be mid-reveal when camera_free_at (= beat.end)
+                # triggered the NEXT beat's camera move / camera_transition
+                # sweep hand — the exact "swipe hand pops up while the
+                # drawing hand is still drawing" bug. Now always finishes
+                # with a real buffer before the beat's own end, never longer
+                # than 1.3s.
+                _draw_beat_duration = max(0.01, beat["end"] - beat["start"])
+                beat_out["min_reveal_duration"] = min(1.3, max(0.3, _draw_beat_duration - 0.4))
                 beat_out["path_transform"] = icon_path_info["transform"]
             else:
                 # mask_wipe illustration — no path data, template reveals via clip-path sweep instead.

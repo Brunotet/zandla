@@ -63,6 +63,18 @@
   let FRAME_W = 1920, FRAME_H = 1080; // set from scene.frame at boot, used to center the swipe hand
   const transitionLayer = document.getElementById('transition-layer');
 
+  // ── ONE HAND AT A TIME — hard invariant, not just timing ──────────
+  // Previously the sweep hid #active-hand via display:none for its own
+  // window, but placeHandSprite unconditionally sets display='' on
+  // EVERY call — so if a write/draw beat's stroke-reveal onUpdate was
+  // still firing during that same window (e.g. a short-narration icon
+  // whose reveal hadn't finished yet), it kept re-showing the hand
+  // every single frame, fighting the sweep's hide. Two hands visible
+  // at once was the direct result. This flag makes the suppression
+  // authoritative in ONE place instead of a display-toggle race
+  // between two independent callers.
+  let handSweepActive = false;
+
   // ── Camera: drives the SVG viewBox directly, see camera.py for why ──
   function buildCameraTimeline(keyframes) {
     if (!keyframes || keyframes.length === 0) return;
@@ -274,7 +286,11 @@
     if (!currentHref || !currentHref.endsWith(file)) {
       img.setAttribute('href', `assets/hands/${file}`);
     }
-    img.style.display = '';
+    // Authoritative check, not just "set visible and hope nothing else
+    // hides it later" — see handSweepActive comment above. A stroke
+    // reveal's onUpdate can still be firing (it doesn't know a sweep
+    // started), so this is what actually guarantees one hand at a time.
+    img.style.display = handSweepActive ? 'none' : '';
     img.setAttribute('x', x);
     img.setAttribute('y', y);
     img.setAttribute('width', w);
@@ -362,10 +378,12 @@
     // did nothing the entire time. Lookup now happens INSIDE each
     // delayed callback, at the moment it actually runs.
     gsap.delayedCall(startDelay, () => {
+      handSweepActive = true;
       const activeHand = document.getElementById('active-hand');
       if (activeHand) activeHand.style.display = 'none';
     });
     gsap.delayedCall(startDelay + duration, () => {
+      handSweepActive = false;
       const activeHand = document.getElementById('active-hand');
       if (activeHand) activeHand.style.display = '';
     });
