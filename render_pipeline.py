@@ -35,9 +35,10 @@ REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 # drawn size. Tune this single number if "enlarge" should read as
 # more/less dramatic — nothing else needs to change.
 ICON_ENLARGE_SCALE = 1.45  # reduced from 1.9 — was overflowing off-canvas on pinch-enlarge
-ICON_STROKE_WIDTH = 3.0  # fixed, screen-space-constant (see vector-effect="non-scaling-stroke"
-                          # in scene_template.html) — same thickness on every icon regardless
-                          # of that icon's own fit-scale or camera zoom level
+ICON_STROKE_TARGET_PX = 45.0  # numerator for scale-compensated stroke width (stroke_width =
+                               # this / icon_path_info["scale"]) — tuned to land near "puzzle
+                               # icon" thickness, moderately increased from the original 5.0.
+                               # Wide clamp applied at each usage site, not a tight band.
 
 # Camera pacing — NOT a fixed move duration. Real duration is derived
 # per-move from (a) how far the camera actually has to travel between
@@ -281,6 +282,17 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
     # after every beat with an active stroke-reveal or pinch gesture.
     camera_free_at = 0.0
     last_camera_center = _region_center(first_region) if first_region else None
+    # BUG FIXED: icon_group_id used to be generated purely from
+    # concept_key (f"icon-{concept_key}"), with no per-beat
+    # disambiguation. If two SEPARATE, unrelated beats picked the same
+    # concept_key (e.g. two different sentences both drawing "brain"),
+    # their paths landed in the SAME DOM group and both stayed visible
+    # forever, overlapping — confirmed via code read, this is what
+    # produced two simultaneous brain icons. Each draw now gets a
+    # group id unique to THAT beat; this dict tracks which group id is
+    # the CURRENT (most recently drawn) one for a given concept_key, so
+    # point/zoom_in/zoom_out can still find the right icon to reference.
+    concept_group_ids = {}
 
     def _apply_camera_move(beat_out_ref, beat_ref, region_ref, action, skip_transition=False):
         """Moves the camera toward region_ref (or the default wide view
@@ -432,12 +444,26 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             beat_words = [w for w in global_words if beat["start"] - 0.05 <= w["start"] < beat["end"] + 0.05]
             word_groups = stroke_info["word_groups"]
 
+            # WRITING FINISHES EARLY, ON PURPOSE: previously the last
+            # word's stroke finished at EXACTLY that word's own audio
+            # end — zero buffer before the camera/swipe needed to move,
+            # which is why the writing hand was still active right as
+            # the swipe fired. All word timings are compressed by the
+            # same ratio (rhythm relative to each other is preserved,
+            # just the whole thing runs a bit faster) so the sentence
+            # finishes being written roughly BUFFER_SECONDS before its
+            # own audio ends — about 2-3 words' worth at typical pace.
+            BUFFER_SECONDS = 1.1
+            beat_duration = max(0.01, beat["end"] - beat["start"])
+            compressed_duration = max(0.5, beat_duration - BUFFER_SECONDS)
+            time_compression = compressed_duration / beat_duration
+
             if len(beat_words) == len(word_groups) and len(beat_words) > 0:
                 segment_durations = [None] * len(stroke_info["subpaths"])
                 segment_delays = [None] * len(stroke_info["subpaths"])
                 for gw, wg in zip(beat_words, word_groups):
-                    word_start = max(0.0, gw["start"] - beat["start"])
-                    word_duration = max(0.05, gw["end"] - gw["start"])
+                    word_start = max(0.0, (gw["start"] - beat["start"]) * time_compression)
+                    word_duration = max(0.05, (gw["end"] - gw["start"]) * time_compression)
                     n_strokes = wg["subpath_end"] - wg["subpath_start"]
                     per_stroke = word_duration / max(1, n_strokes)
                     for i in range(wg["subpath_start"], wg["subpath_end"]):
@@ -451,6 +477,11 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                       f"— falling back to length-proportional reveal for this beat")
                 beat_out["segment_durations"] = None
                 beat_out["segment_delays"] = None
+                # Fallback also needs to finish early — shrink the
+                # window animateStrokeReveal treats as "beat.end" for
+                # its length-proportional pacing (see totalDuration in
+                # scene_template.html), same buffer amount.
+                beat_out["end"] = beat["start"] + compressed_duration
 
             # NOTE: hand tracks the LIVE point on the stroke-reveal path every
             # frame, not a single static target — so we hand the template the
@@ -509,19 +540,23 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                         f"beat_id={beat['beat_id']}: icon_word concept_key resolved to an icon with "
                         f"no usable <path> data — pick a different concept_key for this beat."
                     )
+                icon_group_id = f"icon-{beat['beat_id']}"
+                concept_group_ids[beat.get("concept_key")] = icon_group_id
                 sub_visuals.append({
                     "beat_id": f"{beat['beat_id']}-icon",
                     "subpaths": icon_path_info["subpaths"],
-                    # THICKNESS FIXED FOR REAL THIS TIME: the scale-
-                    # compensated formula (5.0/scale) was inconsistent
-                    # across different icons — "some visible, some not"
-                    # points to icon_path_info["scale"] itself varying
-                    # unreliably per icon (can't fully verify without
-                    # svg_to_path.py). Dropped the dependency entirely —
-                    # fixed width matching the puzzle icon's thickness.
-                    "stroke_width": ICON_STROKE_WIDTH,
+                    # THICKNESS: scale-compensated (not a flat constant)
+                    # so it looks visually consistent across icons whose
+                    # fit-scale differs — a truly fixed width only works
+                    # WITH non-scaling-stroke, but that's now confirmed
+                    # (via an actual browser test) to corrupt the
+                    # dasharray reveal, so non-scaling-stroke is only
+                    # applied AFTER the reveal finishes, not during it.
+                    # Wide safety clamp, not a tight band — a tight clamp
+                    # was what caused inconsistent results before.
+                    "stroke_width": max(1.5, min(7.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"])),
                     "path_transform": icon_path_info["transform"],
-                    "icon_group_id": f"icon-{beat.get('concept_key')}".replace(" ", "-"),
+                    "icon_group_id": icon_group_id,
                     "start": beat["start"],
                     "end": beat["start"] + half,
                     "min_reveal_duration": 0.6,
@@ -587,18 +622,22 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                         f"concept_key or extend svg_to_path.py to handle primitive shapes."
                     )
                 beat_out["subpaths"] = icon_path_info["subpaths"]
-                # Stable id so a LATER zoom_in/zoom_out beat referencing
-                # this same concept_key can find and scale THIS exact
-                # icon group in place (see icon_scale below) — separate
-                # from camera movement entirely.
-                beat_out["icon_group_id"] = f"icon-{beat.get('concept_key', beat['beat_id'])}".replace(" ", "-")
-                # THICKNESS FIXED FOR REAL THIS TIME: the scale-
-                # compensated formula was inconsistent across icons —
-                # dropped it, fixed width now (see ICON_STROKE_WIDTH),
-                # combined with vector-effect="non-scaling-stroke" in
-                # the template so it stays visually constant regardless
-                # of that icon's fit-scale or the camera's zoom level.
-                beat_out["stroke_width"] = ICON_STROKE_WIDTH
+                # BUG FIXED: was f"icon-{concept_key}" — collided when
+                # two SEPARATE, unrelated beats picked the same
+                # concept_key (e.g. two different sentences both
+                # drawing "brain"), merging their strokes into the
+                # SAME DOM group so both stayed visible forever,
+                # overlapping. Now unique per beat; concept_group_ids
+                # tracks which one is CURRENT for point/zoom_in/zoom_out.
+                icon_group_id = f"icon-{beat['beat_id']}"
+                concept_group_ids[beat.get("concept_key")] = icon_group_id
+                beat_out["icon_group_id"] = icon_group_id
+                # THICKNESS: scale-compensated during the reveal (see
+                # icon_word branch above for the full reasoning) —
+                # non-scaling-stroke is applied only AFTER the reveal
+                # completes, purely to protect against a later
+                # pinch-enlarge, not during the dasharray animation.
+                beat_out["stroke_width"] = max(1.5, min(7.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"]))
                 beat_out["min_reveal_duration"] = 1.3
                 beat_out["path_transform"] = icon_path_info["transform"]
             else:
@@ -663,14 +702,20 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             ck = beat.get("concept_key")
             if ck:
                 icon_center_y = region["y"] + region["h"] / 2
-                beat_out["icon_scale"] = {
-                    "target_id": f"icon-{ck}".replace(" ", "-"),
-                    "cx": target_x,
-                    "cy": icon_center_y,
-                    "scale": ICON_ENLARGE_SCALE if beat["mode"] == "zoom_in" else 1.0,
-                    "swap_at": swap_at,
-                    "duration": max(0.2, (beat["end"] - beat["start"]) / 2),
-                }
+                # Look up the CURRENT group id for this concept_key —
+                # group ids are unique per beat now (see the
+                # concept_group_ids comment above), so this can't just
+                # be recomputed from concept_key anymore.
+                target_group_id = concept_group_ids.get(ck)
+                if target_group_id:
+                    beat_out["icon_scale"] = {
+                        "target_id": target_group_id,
+                        "cx": target_x,
+                        "cy": icon_center_y,
+                        "scale": ICON_ENLARGE_SCALE if beat["mode"] == "zoom_in" else 1.0,
+                        "swap_at": swap_at,
+                        "duration": max(0.2, (beat["end"] - beat["start"]) / 2),
+                    }
             _apply_camera_move(beat_out, beat, region, beat["mode"])
 
         elif beat["mode"] == "swipe":

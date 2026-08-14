@@ -137,15 +137,6 @@
       // transform), since a single fixed width was wrong for both at
       // once. Falls back to 4 only if somehow missing.
       el.style.strokeWidth = beat.stroke_width || 4;
-      if (beat.icon_group_id) {
-        // Icons can later be pinch-enlarged (icon_scale) via a
-        // transform:scale() on their parent <g> — without this, the
-        // stroke width would ALSO get multiplied by that scale,
-        // making an enlarged icon look progressively thicker on top
-        // of its own size increase. non-scaling-stroke keeps the
-        // line weight constant regardless of the group's transform.
-        el.setAttribute('vector-effect', 'non-scaling-stroke');
-      }
       if (beat.path_transform) {
         el.setAttribute('transform', beat.path_transform);
       }
@@ -198,6 +189,20 @@
           // No rotation — hand stays upright regardless of path curvature.
           onUpdateHand(pt.x, pt.y, 0);
         },
+        onComplete: beat.icon_group_id ? function () {
+          // PROVEN via an actual browser test (not assumed) that this
+          // exact order is required: clear the dash values FIRST, THEN
+          // add non-scaling-stroke. Doing it in the other order (or
+          // having both active at once, which is what the reveal
+          // itself needs) permanently corrupts the stroke into a
+          // dashed pattern — confirmed with screenshots before writing
+          // this. Only applied AFTER the reveal is done, purely to
+          // protect against a LATER pinch-enlarge (icon_scale) also
+          // multiplying the stroke width.
+          el.style.strokeDasharray = '';
+          el.style.strokeDashoffset = '';
+          el.setAttribute('vector-effect', 'non-scaling-stroke');
+        } : undefined,
       }, position);
     });
   }
