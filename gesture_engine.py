@@ -110,11 +110,18 @@ def scaled_erase_zone(target_height: float = DEFAULT_TARGET_HEIGHT) -> dict:
 
 
 def scaled_swipe(direction: str, frame_width: float, target_height: float = DEFAULT_TARGET_HEIGHT,
-                  frame_height: float = None) -> dict:
+                  frame_height: float = None, travel_fraction: float = 1.0) -> dict:
     """Full-canvas clear or camera-transition sweep.
     direction: 'ltr'/'rtl' (horizontal) or 'ttb'/'btt' (vertical —
     requires frame_height, used when the camera pans between rows
-    rather than between columns)."""
+    rather than between columns).
+    travel_fraction: how much of the frame the hand actually crosses,
+    1.0 = full edge-to-edge (the full-board 'swipe' clear gesture
+    needs this — it's meant to wipe the whole board). A smaller value
+    keeps the travel centered and short — just enough to read as a
+    hand passing through, not a full traversal — for the between-
+    sentence camera-transition sweep, which doesn't need to leave the
+    frame at all."""
     g = GESTURES["swipe"]
     native_w, native_h = g["native_size"]
     scale = target_height / native_h
@@ -123,10 +130,11 @@ def scaled_swipe(direction: str, frame_width: float, target_height: float = DEFA
 
     if direction in ("ltr", "rtl"):
         anchor_y = af["y"] * target_height
-        if direction == "ltr":
-            start_x, end_x = -final_w, frame_width
-        else:
-            start_x, end_x = frame_width, -final_w
+        full_start, full_end = -final_w, frame_width
+        center = frame_width / 2
+        half_travel = (full_end - full_start) * travel_fraction / 2
+        a, b = center - half_travel, center + half_travel
+        start_x, end_x = (a, b) if direction == "ltr" else (b, a)
         return {
             "file": g["file"], "mirror": direction == "rtl", "axis": "x",
             "start_x": start_x, "end_x": end_x,
@@ -136,10 +144,11 @@ def scaled_swipe(direction: str, frame_width: float, target_height: float = DEFA
     if frame_height is None:
         raise ValueError("scaled_swipe: frame_height is required for vertical directions ('ttb'/'btt')")
     anchor_x = af.get("x", 0.5) * final_w
-    if direction == "btt":
-        start_y, end_y = frame_height, -target_height
-    else:  # ttb
-        start_y, end_y = -target_height, frame_height
+    full_start, full_end = -target_height, frame_height
+    center = frame_height / 2
+    half_travel = (full_end - full_start) * travel_fraction / 2
+    a, b = center - half_travel, center + half_travel
+    start_y, end_y = (b, a) if direction == "btt" else (a, b)
     return {
         "file": g["file"], "mirror": False, "axis": "y",
         "start_y": start_y, "end_y": end_y,

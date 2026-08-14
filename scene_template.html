@@ -167,7 +167,17 @@
     // in". Icons don't need millisecond-precise lockstep with speech
     // the way word-level text does, so clamp to a minimum that's
     // actually watchable.
-    const totalDuration = Math.max(beat.end - beat.start, beat.min_reveal_duration || 0);
+    // FIXED: was Math.max(beat_duration, min_reveal_duration) — took
+    // whichever was BIGGER, so whenever the sentence's narration ran
+    // longer than min_reveal_duration (nearly always), the icon got
+    // STRETCHED to draw across the ENTIRE sentence instead of
+    // finishing quickly and then just sitting there fully drawn. That
+    // was both why drawing looked slow AND why the icon was still
+    // actively revealing right up until the swipe fired — zero
+    // buffer, because "finish" and "beat end" were the same instant.
+    // min_reveal_duration is now used directly as a fast, fixed
+    // target (falling back to the full span only if genuinely absent).
+    const totalDuration = beat.min_reveal_duration || Math.max(beat.end - beat.start, 0.3);
     const tl = gsap.timeline({ delay: beat.start });
 
     pathEls.forEach((el, i) => {
@@ -201,6 +211,15 @@
           // multiplying the stroke width.
           el.style.strokeDasharray = '';
           el.style.strokeDashoffset = '';
+          // BUG FIXED: switching to non-scaling-stroke without ALSO
+          // updating the width value meant the same number rendered in
+          // a different coordinate space — much thinner. This is the
+          // exact "thick while drawing, thin right after" bug. Applied
+          // at the same instant as the vector-effect change, so there's
+          // no visible jump between the two states.
+          if (beat.stroke_width_final) {
+            el.style.strokeWidth = beat.stroke_width_final;
+          }
           el.setAttribute('vector-effect', 'non-scaling-stroke');
         } : undefined,
       }, position);
@@ -334,9 +353,22 @@
     // — two hands visible together. Hidden for exactly the sweep's
     // own window, then restored automatically the next time
     // placeHandSprite runs for the following beat.
-    const activeHand = document.getElementById('active-hand');
-    gsap.delayedCall(startDelay, () => { if (activeHand) activeHand.style.display = 'none'; });
-    gsap.delayedCall(startDelay + duration, () => { if (activeHand) activeHand.style.display = ''; });
+    // ONE HAND AT A TIME (confirmed bug, and a second one underneath
+    // it): the lookup for #active-hand was done SYNCHRONOUSLY here,
+    // at boot/scheduling time — but the hand element is created
+    // LAZILY on its first actual placement, which itself only happens
+    // later via a delayed callback. At boot time it usually doesn't
+    // exist yet, so this captured `null` and the hide logic silently
+    // did nothing the entire time. Lookup now happens INSIDE each
+    // delayed callback, at the moment it actually runs.
+    gsap.delayedCall(startDelay, () => {
+      const activeHand = document.getElementById('active-hand');
+      if (activeHand) activeHand.style.display = 'none';
+    });
+    gsap.delayedCall(startDelay + duration, () => {
+      const activeHand = document.getElementById('active-hand');
+      if (activeHand) activeHand.style.display = '';
+    });
 
     if (sweep.axis === 'y') {
       // BUG FIXED: sweep.x was never set here (only sweep.anchor_x,

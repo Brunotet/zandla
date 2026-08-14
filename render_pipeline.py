@@ -172,7 +172,8 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
     # math the camera itself uses), plus a safety margin, so no
     # adjacent slot in either direction is ever inside the same shot.
     fitted = _fit_aspect(region_for_bbox({"x": 0, "y": 0, "w": CONTENT_W, "h": CONTENT_H}, padding=60), target_aspect)
-    SAFETY_MARGIN = 160
+    SAFETY_MARGIN = 350  # substantially increased (was 160) per direct feedback that
+                          # bleed was still visible — this is real headroom, not a guess
     SLOT_W = max(500, fitted["w"] + SAFETY_MARGIN)
     SLOT_H = max(400, fitted["h"] + SAFETY_MARGIN)
 
@@ -330,6 +331,11 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                     sweep = gesture_engine.scaled_swipe(
                         direction=direction, frame_width=frame["width"],
                         target_height=int(frame["height"] * 0.3),
+                        # Short, centered pass — not edge-to-edge. This
+                        # is the between-SENTENCE transition, not the
+                        # full-board clear ("swipe" mode below still
+                        # uses the default full travel_fraction=1.0).
+                        travel_fraction=0.38,
                     )
                 else:
                     direction = "btt" if dy > 0 else "ttb"
@@ -337,6 +343,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                         direction=direction, frame_width=frame["width"],
                         frame_height=frame["height"],
                         target_height=int(frame["width"] * 0.3),
+                        travel_fraction=0.38,
                     )
                 # SPEED FIXED — the hand always travels the full
                 # off-screen-to-off-screen distance regardless of how
@@ -555,6 +562,16 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                     # Wide safety clamp, not a tight band — a tight clamp
                     # was what caused inconsistent results before.
                     "stroke_width": max(1.5, min(7.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"])),
+                    # BUG FOUND AND FIXED: switching to non-scaling-stroke
+                    # after the reveal, WITHOUT also updating the numeric
+                    # stroke-width value, meant the SAME number suddenly
+                    # got interpreted in a different coordinate space —
+                    # rendering much thinner right after finishing. This
+                    # is the exact "thick while drawing, thin right after"
+                    # bug. stroke_width_final is the equivalent absolute
+                    # width, applied at the SAME moment non-scaling-stroke
+                    # is — same visual thickness, no jump.
+                    "stroke_width_final": max(1.5, min(7.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"])) * icon_path_info["scale"],
                     "path_transform": icon_path_info["transform"],
                     "icon_group_id": icon_group_id,
                     "start": beat["start"],
@@ -637,7 +654,12 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 # non-scaling-stroke is applied only AFTER the reveal
                 # completes, purely to protect against a later
                 # pinch-enlarge, not during the dasharray animation.
-                beat_out["stroke_width"] = max(1.5, min(7.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"]))
+                _icon_stroke_w = max(1.5, min(7.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"]))
+                beat_out["stroke_width"] = _icon_stroke_w
+                # Equivalent absolute width for non-scaling-stroke,
+                # applied at the same moment — fixes the thick-then-
+                # thin jump right after the reveal finishes.
+                beat_out["stroke_width_final"] = _icon_stroke_w * icon_path_info["scale"]
                 beat_out["min_reveal_duration"] = 1.3
                 beat_out["path_transform"] = icon_path_info["transform"]
             else:
