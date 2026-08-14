@@ -39,10 +39,21 @@ def _parse_viewbox(svg_root) -> tuple:
 
 
 def extract_paths(svg_path: str) -> Optional[list]:
-    """Returns a LIST of `d` strings (one per <path> element found),
-    in the SVG's OWN coordinate space (unscaled) — caller applies
-    fit-to-region scaling. None if the file has no usable <path>
-    elements.
+    """Returns a LIST of `d` strings (one per VISIBLE <path> element
+    found), in the SVG's OWN coordinate space (unscaled) — caller
+    applies fit-to-region scaling. None if the file has no usable
+    <path> elements.
+
+    FIXED (confirmed via isolated test, not assumed): the previous
+    version used root.iter(), which walks EVERY element in the tree
+    including ones inside <defs>, <clipPath>, <mask>, and <symbol> —
+    hidden DEFINITIONS, never directly rendered, just referenced by
+    id elsewhere. A number of icons (Tabler included) use exactly
+    this pattern — e.g. a clipPath containing a full bounding-box
+    path. Walking the whole tree blindly pulled that phantom path in
+    alongside the real visible strokes, producing extra/wrong
+    geometry in the reveal. Now skips anything nested inside those
+    container tags, at any depth.
 
     LIMITATION, stated plainly: this only handles <path> elements.
     Tabler/Phosphor/Lucide/Iconoir icons are overwhelmingly path-based
@@ -61,12 +72,20 @@ def extract_paths(svg_path: str) -> Optional[list]:
 
     root = tree.getroot()
     ds = []
-    for el in root.iter():
+    SKIP_CONTAINER_TAGS = {"defs", "clipPath", "mask", "symbol"}
+
+    def _walk(el, hidden):
         tag = el.tag.replace(SVG_NS, "")
-        if tag == "path":
+        if tag in SKIP_CONTAINER_TAGS:
+            hidden = True
+        if tag == "path" and not hidden:
             d = el.get("d")
             if d:
                 ds.append(d)
+        for child in el:
+            _walk(child, hidden)
+
+    _walk(root, False)
 
     if not ds:
         print(f"[svg_to_path] no <path> elements found in {svg_path} — "

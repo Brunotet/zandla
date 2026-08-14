@@ -60,6 +60,7 @@
   const contentLayer = document.getElementById('content-layer');
   const handLayer = document.getElementById('hand-layer');
   const captionLayer = document.getElementById('caption-layer');
+  let FRAME_W = 1920, FRAME_H = 1080; // set from scene.frame at boot, used to center the swipe hand
   const transitionLayer = document.getElementById('transition-layer');
 
   // ── Camera: drives the SVG viewBox directly, see camera.py for why ──
@@ -249,6 +250,7 @@
     if (!currentHref || !currentHref.endsWith(file)) {
       img.setAttribute('href', `assets/hands/${file}`);
     }
+    img.style.display = '';
     img.setAttribute('x', x);
     img.setAttribute('y', y);
     img.setAttribute('width', w);
@@ -318,23 +320,41 @@
     if (sweep.mirror) img.style.transform = 'scaleX(-1)';
     transitionLayer.appendChild(img);
 
+    const duration = Math.max(0.1, sweep.duration);
+    const startDelay = Math.max(0, sweep.start);
+
+    // ONE HAND AT A TIME (confirmed bug): the writing/drawing hand
+    // sprite (#active-hand) was never hidden after it finished, so it
+    // sat resting on screen at the SAME time the swipe hand appeared
+    // — two hands visible together. Hidden for exactly the sweep's
+    // own window, then restored automatically the next time
+    // placeHandSprite runs for the following beat.
+    const activeHand = document.getElementById('active-hand');
+    gsap.delayedCall(startDelay, () => { if (activeHand) activeHand.style.display = 'none'; });
+    gsap.delayedCall(startDelay + duration, () => { if (activeHand) activeHand.style.display = ''; });
+
     if (sweep.axis === 'y') {
-      img.style.left = `${sweep.anchor_x !== undefined ? sweep.anchor_x : 0}px`;
+      // BUG FIXED: sweep.x was never set here (only sweep.anchor_x,
+      // the raw internal anchor offset), so it wasn't actually
+      // centered on the frame — same class of bug as the y case below.
+      img.style.left = `${FRAME_W / 2 - (sweep.anchor_x !== undefined ? sweep.anchor_x : sweep.w / 2)}px`;
       img.style.top = `${sweep.start_y}px`;
       gsap.to(img.style, {
         top: `${sweep.end_y}px`,
-        duration: Math.max(0.1, sweep.duration),
-        delay: Math.max(0, sweep.start),
+        duration, delay: startDelay,
         ease: 'power1.inOut',
         onComplete: () => img.remove(),
       });
     } else {
-      img.style.top = `${sweep.y !== undefined ? sweep.y : 0}px`;
+      // BUG FIXED: sweep.y was never set by the camera-transition path
+      // (only the full-board 'swipe' mode set it) — silently defaulted
+      // to 0, i.e. the TOP of the screen, instead of being centered
+      // where the writing/content actually is.
+      img.style.top = `${FRAME_H / 2 - (sweep.anchor_y !== undefined ? sweep.anchor_y : sweep.h / 2)}px`;
       img.style.left = `${sweep.start_x}px`;
       gsap.to(img.style, {
         left: `${sweep.end_x}px`,
-        duration: Math.max(0.1, sweep.duration),
-        delay: Math.max(0, sweep.start),
+        duration, delay: startDelay,
         ease: 'power1.inOut',
         onComplete: () => img.remove(),
       });
@@ -451,6 +471,8 @@
     // without touching this file at all.
     const fw = scene.frame ? scene.frame.width : 1920;
     const fh = scene.frame ? scene.frame.height : 1080;
+    FRAME_W = fw;
+    FRAME_H = fh;
     document.getElementById('stage').style.width = `${fw}px`;
     document.getElementById('stage').style.height = `${fh}px`;
     worldEl.setAttribute('viewBox', `0 0 ${fw} ${fh}`);

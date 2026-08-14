@@ -34,7 +34,10 @@ REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 # How much bigger a pinched-in icon gets, relative to its original
 # drawn size. Tune this single number if "enlarge" should read as
 # more/less dramatic — nothing else needs to change.
-ICON_ENLARGE_SCALE = 1.9
+ICON_ENLARGE_SCALE = 1.45  # reduced from 1.9 — was overflowing off-canvas on pinch-enlarge
+ICON_STROKE_WIDTH = 3.0  # fixed, screen-space-constant (see vector-effect="non-scaling-stroke"
+                          # in scene_template.html) — same thickness on every icon regardless
+                          # of that icon's own fit-scale or camera zoom level
 
 # Camera pacing — NOT a fixed move duration. Real duration is derived
 # per-move from (a) how far the camera actually has to travel between
@@ -154,20 +157,23 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
     board = get_board_dims(orientation)
     frame = get_frame_dims(orientation)
     target_aspect = frame["width"] / frame["height"]
-    SLOT_W = 500
-    CONTENT_W, CONTENT_H = SLOT_W - 80, 400 - 80  # unchanged content box size for a single-item slot
+    CONTENT_W, CONTENT_H = 420, 320  # unchanged content box size for a single-item slot
 
-    # ROW SPACING BUG (confirmed, not assumed): the camera fits each
-    # slot to the OUTPUT aspect ratio (see camera.py's _fit_aspect),
-    # which for portrait video inflates the framed height to ~960px
-    # around a 420x320 content box — but rows were spaced a flat
-    # 400px apart regardless of orientation. That means the camera's
-    # actual shot for ANY single beat already spanned into the row
-    # above and below it. SLOT_H is now derived from what the camera
-    # will really frame, plus a safety margin, so adjacent rows are
-    # never inside the same shot.
+    # SPACING BUG, FULLY FIXED THIS TIME — last pass only corrected
+    # ROW spacing (vertical) and missed that COLUMN spacing (horizontal)
+    # has the exact same problem, and is actually the more common case
+    # to hit since most beat-to-beat moves advance to the next column,
+    # not the next row. Confirmed by direct measurement: the camera's
+    # real fitted footprint around one slot is 540px wide in portrait
+    # and 782px wide in landscape — but columns were still spaced a
+    # flat 500px apart in both. Both SLOT_W and SLOT_H now come from
+    # what the camera will ACTUALLY frame (via the same _fit_aspect
+    # math the camera itself uses), plus a safety margin, so no
+    # adjacent slot in either direction is ever inside the same shot.
     fitted = _fit_aspect(region_for_bbox({"x": 0, "y": 0, "w": CONTENT_W, "h": CONTENT_H}, padding=60), target_aspect)
-    SLOT_H = max(400, fitted["h"] + 140)
+    SAFETY_MARGIN = 160
+    SLOT_W = max(500, fitted["w"] + SAFETY_MARGIN)
+    SLOT_H = max(400, fitted["h"] + SAFETY_MARGIN)
 
     COLS = max(2, board["width"] // SLOT_W)
     MARGIN = 100
@@ -332,7 +338,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 # "matches" the camera move rather than just being a
                 # fixed constant with no relationship to it.
                 move_arrival = camera_free_at + duration
-                sweep_duration = max(0.5, duration)
+                sweep_duration = max(0.9, duration)
                 sweep["start"] = move_arrival - sweep_duration
                 sweep["duration"] = sweep_duration
                 beat_out_ref["camera_transition"] = sweep
@@ -506,14 +512,14 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 sub_visuals.append({
                     "beat_id": f"{beat['beat_id']}-icon",
                     "subpaths": icon_path_info["subpaths"],
-                    # THICKNESS BUG FIXED: this had no upper bound before.
-                    # 5.0/scale is meant to compensate so icons read at a
-                    # consistent ~5px visual stroke regardless of size —
-                    # but with no ceiling, a smaller fitted region (e.g.
-                    # inside a grouped sub-cell) drives scale down and
-                    # this ratio up UNBOUNDED, producing visibly thicker
-                    # strokes on smaller icons. Clamped.
-                    "stroke_width": max(1.0, min(3.5, 5.0 / icon_path_info["scale"])),
+                    # THICKNESS FIXED FOR REAL THIS TIME: the scale-
+                    # compensated formula (5.0/scale) was inconsistent
+                    # across different icons — "some visible, some not"
+                    # points to icon_path_info["scale"] itself varying
+                    # unreliably per icon (can't fully verify without
+                    # svg_to_path.py). Dropped the dependency entirely —
+                    # fixed width matching the puzzle icon's thickness.
+                    "stroke_width": ICON_STROKE_WIDTH,
                     "path_transform": icon_path_info["transform"],
                     "icon_group_id": f"icon-{beat.get('concept_key')}".replace(" ", "-"),
                     "start": beat["start"],
@@ -586,18 +592,13 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 # icon group in place (see icon_scale below) — separate
                 # from camera movement entirely.
                 beat_out["icon_group_id"] = f"icon-{beat.get('concept_key', beat['beat_id'])}".replace(" ", "-")
-                # Icons DO have a wrapping scale transform (unlike text,
-                # where scale is baked directly into coordinates) — a
-                # stroke-width attribute gets multiplied by that
-                # transform's scale when rendered, so to land on a
-                # consistent ~5px VISUAL width regardless of how much
-                # the icon itself got scaled up/down, divide by that
-                # same scale factor here.
-                # THICKNESS BUG FIXED: no upper bound before — a
-                # smaller fitted region (e.g. a grouped sub-cell) drove
-                # this ratio up unbounded, producing visibly thicker
-                # strokes on smaller icons. Clamped.
-                beat_out["stroke_width"] = max(1.0, min(3.5, 5.0 / icon_path_info["scale"]))
+                # THICKNESS FIXED FOR REAL THIS TIME: the scale-
+                # compensated formula was inconsistent across icons —
+                # dropped it, fixed width now (see ICON_STROKE_WIDTH),
+                # combined with vector-effect="non-scaling-stroke" in
+                # the template so it stays visually constant regardless
+                # of that icon's fit-scale or the camera's zoom level.
+                beat_out["stroke_width"] = ICON_STROKE_WIDTH
                 beat_out["min_reveal_duration"] = 1.3
                 beat_out["path_transform"] = icon_path_info["transform"]
             else:
@@ -636,8 +637,12 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
         elif beat["mode"] in ("zoom_in", "zoom_out") and region:
             direction = "in" if beat["mode"] == "zoom_in" else "out"
             target_x = region["x"] + region["w"] / 2
-            target_y = region["y"] + region["h"] / 2
             th = region["h"] * 0.5
+            # BELOW the icon, not centered on/beside it — the pinch
+            # hand's own anchor point is placed this far past the
+            # region's bottom edge (half its own height + a gap) so it
+            # sits clearly underneath instead of overlapping the icon.
+            target_y = region["y"] + region["h"] + th * 0.55
             start_hand, end_hand = gesture_engine.zoom_swap_pair(direction=direction, target_height=th)
             swap_at = (beat["start"] + beat["end"]) / 2
             beat_out["hand_swap"] = {
@@ -657,10 +662,11 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             # the pinch hand still plays, just without an icon to grow.
             ck = beat.get("concept_key")
             if ck:
+                icon_center_y = region["y"] + region["h"] / 2
                 beat_out["icon_scale"] = {
                     "target_id": f"icon-{ck}".replace(" ", "-"),
                     "cx": target_x,
-                    "cy": target_y,
+                    "cy": icon_center_y,
                     "scale": ICON_ENLARGE_SCALE if beat["mode"] == "zoom_in" else 1.0,
                     "swap_at": swap_at,
                     "duration": max(0.2, (beat["end"] - beat["start"]) / 2),
