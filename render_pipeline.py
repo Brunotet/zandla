@@ -176,12 +176,29 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
     # math the camera itself uses), plus a safety margin, so no
     # adjacent slot in either direction is ever inside the same shot.
     fitted = _fit_aspect(region_for_bbox({"x": 0, "y": 0, "w": CONTENT_W, "h": CONTENT_H}, padding=60), target_aspect)
-    SAFETY_MARGIN = 350  # substantially increased (was 160) per direct feedback that
-                          # bleed was still visible — this is real headroom, not a guess
+    SAFETY_MARGIN = 350
     SLOT_W = max(500, fitted["w"] + SAFETY_MARGIN)
     SLOT_H = max(400, fitted["h"] + SAFETY_MARGIN)
 
-    COLS = max(2, board["width"] // SLOT_W)
+    # SECOND, SEPARATE SPACING BUG FOUND AND FIXED — the one above
+    # (SLOT_W/SLOT_H sized from the camera's single-slot footprint)
+    # does NOT cover this case: a beat that's part of a GROUP (shared
+    # slot, sub-divided into up to 4 columns) near the EDGE of its
+    # slot gets its own camera fit-growth centered on ITS OWN
+    # off-center position, not the slot's center — this pushes its
+    # fitted view past the slot boundary independent of SLOT_W. Proven
+    # numerically: growing SLOT_W to even 3000+ converges to a fixed
+    # ~20-unit overlap between the last item of one slot and the first
+    # item of the next (4-item groups, the worst case) — it does NOT
+    # go away no matter how large SLOT_W gets, because the overhang
+    # comes from padding applied to a narrow sub-cell, not from slot
+    # width itself. What DOES close it (verified): literal extra space
+    # inserted directly BETWEEN slots, on top of SLOT_W.
+    INTER_SLOT_GAP = 180
+
+    SLOT_PITCH_W = SLOT_W + INTER_SLOT_GAP
+    SLOT_PITCH_H = SLOT_H + INTER_SLOT_GAP
+    COLS = max(2, board["width"] // SLOT_PITCH_W)
     MARGIN = 100
     MAX_ITEMS_PER_SLOT = 4
 
@@ -214,8 +231,8 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
     for slot_i, chunk in enumerate(chunks):
         col = slot_i % COLS
         row = slot_i // COLS
-        base_x = MARGIN + col * SLOT_W
-        base_y = MARGIN + row * SLOT_H
+        base_x = MARGIN + col * SLOT_PITCH_W
+        base_y = MARGIN + row * SLOT_PITCH_H
         full_w, full_h = CONTENT_W, CONTENT_H
 
         items = chunk[:MAX_ITEMS_PER_SLOT]

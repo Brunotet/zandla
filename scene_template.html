@@ -233,6 +233,16 @@
         } : undefined,
       }, position);
     });
+
+    // FIXED: the hand used to just sit at its last position once the
+    // reveal finished, visible and unmoving, until the NEXT swipe (or
+    // nothing) eventually hid it — reported as "freezing there for a
+    // few ms" (in practice, up to the full buffer window). Now hides
+    // immediately the instant this beat's own reveal is fully done.
+    tl.eventCallback('onComplete', () => {
+      const activeHand = document.getElementById('active-hand');
+      if (activeHand) activeHand.style.display = 'none';
+    });
   }
 
   // ── Natural jitter ────────────────────────────────────────────────
@@ -356,12 +366,6 @@
     const duration = Math.max(0.1, sweep.duration);
     const startDelay = Math.max(0, sweep.start);
 
-    // ONE HAND AT A TIME (confirmed bug): the writing/drawing hand
-    // sprite (#active-hand) was never hidden after it finished, so it
-    // sat resting on screen at the SAME time the swipe hand appeared
-    // — two hands visible together. Hidden for exactly the sweep's
-    // own window, then restored automatically the next time
-    // placeHandSprite runs for the following beat.
     // ONE HAND AT A TIME (confirmed bug, and a second one underneath
     // it): the lookup for #active-hand was done SYNCHRONOUSLY here,
     // at boot/scheduling time — but the hand element is created
@@ -369,15 +373,26 @@
     // later via a delayed callback. At boot time it usually doesn't
     // exist yet, so this captured `null` and the hide logic silently
     // did nothing the entire time. Lookup now happens INSIDE each
-    // delayed callback, at the moment it actually runs.
+    // delayed callback, at the moment it actually runs. The
+    // "restore visibility after the swipe" call that used to be here
+    // is gone — placeHandSprite already un-hides the hand the moment
+    // it's actually needed again for real content, and restoring it
+    // right after the swipe (with nothing yet drawn) could flash a
+    // stale hand sitting at its old position.
     gsap.delayedCall(startDelay, () => {
       const activeHand = document.getElementById('active-hand');
       if (activeHand) activeHand.style.display = 'none';
     });
-    gsap.delayedCall(startDelay + duration, () => {
-      const activeHand = document.getElementById('active-hand');
-      if (activeHand) activeHand.style.display = '';
-    });
+
+    // STUCK/FROZEN HAND BUG, CONFIRMED: this img element was created
+    // and made visible IMMEDIATELY when this function ran (at boot,
+    // synchronously, for every beat at once) — but its actual motion
+    // doesn't start until `delay` elapses, which could be seconds or
+    // even most of the video away. That's exactly what "a hand just
+    // sitting there unmoving for a long stretch" looks like: it WAS
+    // visible the whole time, just not yet animating. Hidden until
+    // the instant its own tween actually starts.
+    img.style.opacity = '0';
 
     if (sweep.axis === 'y') {
       // BUG FIXED: sweep.x was never set here (only sweep.anchor_x,
@@ -389,6 +404,7 @@
         top: `${sweep.end_y}px`,
         duration, delay: startDelay,
         ease: 'power1.inOut',
+        onStart: () => { img.style.opacity = '1'; },
         onComplete: () => img.remove(),
       });
     } else {
@@ -402,6 +418,7 @@
         left: `${sweep.end_x}px`,
         duration, delay: startDelay,
         ease: 'power1.inOut',
+        onStart: () => { img.style.opacity = '1'; },
         onComplete: () => img.remove(),
       });
     }
