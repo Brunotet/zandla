@@ -469,6 +469,11 @@
       if (beat.illustration_path && beat.illustration_region) {
         animateMaskWipe(beat);
       }
+      // Multi-item (2-4 icons/words) mask_wipe fallback — parallel,
+      // additive array, doesn't touch the single-illustration case above.
+      if (beat.illustration_items) {
+        beat.illustration_items.forEach((illus) => animateMaskWipe(illus));
+      }
       beat.sub_visuals.forEach((sub) => {
         animateStrokeReveal(sub, (px, py, angle) => {
           const j = naturalJitter(performance.now() / 1000, h.h);

@@ -49,16 +49,47 @@ def validate_beat(beat: dict, index: int) -> None:
             f"must be one of {sorted(VALID_MODES)}"
         )
 
-    if beat["mode"] in ("draw", "icon_word", "point", "zoom_in", "zoom_out", "drag") and "concept_key" not in beat:
+    has_items = beat["mode"] == "icon_word" and bool(beat.get("items"))
+
+    if beat["mode"] in ("draw", "point", "zoom_in", "zoom_out", "drag") and "concept_key" not in beat:
         raise BeatValidationError(
             f"beat[{index}] (id={beat['beat_id']}) mode='{beat['mode']}' requires a concept_key"
         )
 
-    if beat["mode"] == "icon_word" and not str(beat.get("label", "")).strip():
-        raise BeatValidationError(
-            f"beat[{index}] (id={beat['beat_id']}) mode='icon_word' requires a non-empty 'label' "
-            f"(the short word/phrase written beside the icon, e.g. concept_key='food', label='good')"
-        )
+    if beat["mode"] == "icon_word" and not has_items:
+        if "concept_key" not in beat:
+            raise BeatValidationError(
+                f"beat[{index}] (id={beat['beat_id']}) mode='icon_word' requires a concept_key "
+                f"(or an 'items' list of 2-4 icons/words instead)"
+            )
+        if not str(beat.get("label", "")).strip():
+            raise BeatValidationError(
+                f"beat[{index}] (id={beat['beat_id']}) mode='icon_word' requires a non-empty 'label' "
+                f"(the short word/phrase written beside the icon, e.g. concept_key='food', label='good')"
+            )
+
+    if has_items:
+        items = beat["items"]
+        if not isinstance(items, list) or not (2 <= len(items) <= 4):
+            raise BeatValidationError(
+                f"beat[{index}] (id={beat['beat_id']}) mode='icon_word' with 'items' needs a list of "
+                f"2-4 entries, got {items!r}"
+            )
+        for item_idx, item in enumerate(items):
+            item_type = item.get("type", "icon")
+            if item_type not in ("icon", "word"):
+                raise BeatValidationError(
+                    f"beat[{index}] (id={beat['beat_id']}) items[{item_idx}] has invalid type "
+                    f"'{item_type}', must be 'icon' or 'word'"
+                )
+            if item_type == "icon" and not str(item.get("concept_key", "")).strip():
+                raise BeatValidationError(
+                    f"beat[{index}] (id={beat['beat_id']}) items[{item_idx}] type='icon' requires a concept_key"
+                )
+            if item_type == "word" and not str(item.get("label", "")).strip():
+                raise BeatValidationError(
+                    f"beat[{index}] (id={beat['beat_id']}) items[{item_idx}] type='word' requires a non-empty label"
+                )
 
     if not beat["text"].strip():
         raise BeatValidationError(f"beat[{index}] (id={beat['beat_id']}) has empty text")
@@ -79,6 +110,13 @@ def validate_beats_against_vocabulary(beats: list, vocabulary: set) -> None:
                 f"beat[{i}] (id={beat['beat_id']}) references unknown concept_key '{ck}' "
                 f"— not present in any concept-library.json. Add it before rendering."
             )
+        for item_idx, item in enumerate(beat.get("items") or []):
+            item_ck = item.get("concept_key")
+            if item_ck and item_ck not in vocabulary:
+                raise BeatValidationError(
+                    f"beat[{i}] (id={beat['beat_id']}) items[{item_idx}] references unknown concept_key "
+                    f"'{item_ck}' — not present in any concept-library.json. Add it before rendering."
+                )
 
 
 def validate_batch(beats: list, vocabulary: Optional[set] = None) -> None:

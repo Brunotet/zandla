@@ -538,6 +538,119 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
 
             _apply_camera_move(beat_out, beat, region, "zoom_in")
 
+        elif beat["mode"] == "icon_word" and region and beat.get("items"):
+            # NEW: 2-4 icons/words sharing ONE beat's region, side by
+            # side, e.g. "food [icon] = [icon] good [word]". Purely
+            # additive — reuses the exact same primitives every other
+            # mode already relies on (resolve_beat_asset, icon_to_path_d,
+            # text_to_strokes, animateStrokeReveal/animateMaskWipe via
+            # sub_visuals/illustration_items) rather than inventing a
+            # new rendering path. A script that never sets "items" never
+            # reaches this branch at all — the single icon+label path
+            # right below is completely untouched.
+            items = beat["items"][:4]
+            if len(items) < 2:
+                raise RuntimeError(
+                    f"beat_id={beat['beat_id']}: mode='icon_word' with 'items' needs 2-4 entries, got {len(items)}"
+                )
+            n = len(items)
+            item_gap = region["w"] * 0.03
+            cell_w = (region["w"] - item_gap * (n - 1)) / n
+            per_item_duration = (beat["end"] - beat["start"]) / n
+            # Each item's OWN reveal is capped short (like a single
+            # icon_word icon-half) so it finishes fast within its slice
+            # instead of stretching to fill it — same reasoning as the
+            # min_reveal_duration fix elsewhere.
+            per_item_reveal = min(per_item_duration, 0.9)
+
+            sub_visuals = []
+            illustration_items = []
+            beat_out["region"] = region
+
+            for idx, item in enumerate(items):
+                cell_x = region["x"] + idx * (cell_w + item_gap)
+                cell_region = {"x": cell_x, "y": region["y"], "w": cell_w, "h": region["h"]}
+                item_start = beat["start"] + idx * per_item_duration
+                item_type = item.get("type", "icon")
+
+                if item_type == "word":
+                    label = (item.get("label") or "").strip()
+                    if not label:
+                        raise RuntimeError(f"beat_id={beat['beat_id']}: items[{idx}] type='word' needs a non-empty 'label'")
+                    pad = 0.15
+                    usable_w = cell_region["w"] * (1 - 2 * pad)
+                    usable_h = cell_region["h"] * (1 - 2 * pad)
+                    font_size = text_to_path.fit_font_size(label, usable_w, usable_h)
+                    text_x = cell_region["x"] + cell_region["w"] * pad
+                    text_y = cell_region["y"] + (cell_region["h"] - font_size) / 2
+                    stroke_info = text_to_path.text_to_strokes(label, x=text_x, y=text_y, font_size=font_size)
+                    sub_visuals.append({
+                        "beat_id": f"{beat['beat_id']}-item{idx}",
+                        "subpaths": stroke_info["subpaths"],
+                        "stroke_width": max(1.5, font_size * 0.045),
+                        "path_transform": None,
+                        "start": item_start,
+                        "end": item_start + per_item_reveal,
+                    })
+                    continue
+
+                concept_key = (item.get("concept_key") or "").strip()
+                if not concept_key:
+                    raise RuntimeError(f"beat_id={beat['beat_id']}: items[{idx}] type='icon' needs a 'concept_key'")
+                item_asset_entry = resolve_beat_asset(
+                    {"concept_key": concept_key, "beat_id": f"{beat['beat_id']}-item{idx}"},
+                    channel, illustration_cache_dir,
+                )
+                print(f"[render_pipeline] beat_id={beat['beat_id']} items[{idx}] concept_key={concept_key!r} "
+                      f"-> resolved: source={item_asset_entry.get('asset_source')}")
+
+                if item_asset_entry.get("draw_style") == "stroke_reveal":
+                    svg_path = item_asset_entry["asset_ref"].get("path")
+                    icon_path_info = svg_to_path.icon_to_path_d(svg_path, cell_region) if svg_path else None
+                    if icon_path_info is None:
+                        raise RuntimeError(
+                            f"beat_id={beat['beat_id']}: items[{idx}] concept_key={concept_key!r} resolved to an "
+                            f"icon with no usable <path> data — pick a different concept_key for this item."
+                        )
+                    icon_group_id = f"icon-{beat['beat_id']}-item{idx}"
+                    concept_group_ids[concept_key] = icon_group_id
+                    stroke_w = max(0.3, min(3.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"]))
+                    sub_visuals.append({
+                        "beat_id": f"{beat['beat_id']}-item{idx}",
+                        "subpaths": icon_path_info["subpaths"],
+                        "stroke_width": stroke_w,
+                        "stroke_width_final": stroke_w * icon_path_info["scale"],
+                        "path_transform": icon_path_info["transform"],
+                        "path_offset_x": icon_path_info["offset_x"],
+                        "path_offset_y": icon_path_info["offset_y"],
+                        "path_scale": icon_path_info["scale"],
+                        "icon_group_id": icon_group_id,
+                        "start": item_start,
+                        "end": item_start + per_item_reveal,
+                        "min_reveal_duration": per_item_reveal,
+                    })
+                else:
+                    icon_group_id = f"icon-{beat['beat_id']}-item{idx}"
+                    concept_group_ids[concept_key] = icon_group_id
+                    illustration_items.append({
+                        "beat_id": f"{beat['beat_id']}-item{idx}-illus",
+                        "illustration_path": item_asset_entry["asset_ref"].get("cached_path"),
+                        "illustration_region": cell_region,
+                        "illustration_start": item_start,
+                        "illustration_end": item_start + per_item_reveal,
+                        "mask_wipe_hand": gesture_engine.scaled_hand(
+                            "drag", target_height=cell_region["h"] * 0.5
+                        ).to_dict(),
+                    })
+
+            beat_out["sub_visuals"] = sub_visuals
+            if illustration_items:
+                beat_out["illustration_items"] = illustration_items
+            target_height = region["h"] * 0.55
+            beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
+
+            _apply_camera_move(beat_out, beat, region, "zoom_in")
+
         elif beat["mode"] == "icon_word" and region:
             # Left ~42% of this beat's region for the icon, right side
             # for the short written label — NOT the full sentence, just
