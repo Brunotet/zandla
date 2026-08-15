@@ -458,6 +458,32 @@
     });
   }
 
+  // ── Erase + relabel (NEW, opt-in) ──────────────────────────────────
+  // Only ever called when a zoom_in beat explicitly provided
+  // "erase_relabel" data — see render_pipeline.py. Erases the OLD word
+  // next to a zoomed-in icon and writes a NEW one specific to this
+  // sentence, reusing the same erase-hand and write-hand primitives,
+  // and the same stroke-reveal renderer, as everything else.
+  function animateEraseAndRelabel(cfg) {
+    gsap.delayedCall(cfg.erase_start, () => {
+      const eh = cfg.erase_hand;
+      placeHandSprite(eh.file, eh.x, eh.y, eh.w, eh.h, 0);
+      const oldGroup = document.getElementById(cfg.old_label_group_id);
+      if (oldGroup) oldGroup.style.display = 'none';
+    });
+    gsap.delayedCall(cfg.erase_start + cfg.erase_duration, () => {
+      const activeHand = document.getElementById('active-hand');
+      if (activeHand) activeHand.style.display = 'none';
+      if (cfg.new_label_subvisual && cfg.new_label_hand) {
+        const h = cfg.new_label_hand;
+        animateStrokeReveal(cfg.new_label_subvisual, (px, py, angle) => {
+          const j = naturalJitter(performance.now() / 1000, h.h);
+          placeHandSprite(h.file, px + j.dx - h.anchor_x, py + j.dy - h.anchor_y, h.w, h.h, 0, px + j.dx, py + j.dy);
+        });
+      }
+    });
+  }
+
   // ── Beat dispatch ─────────────────────────────────────────────────
   function scheduleBeat(beat) {
     if (beat.mode === 'icon_word' && beat.sub_visuals && beat.hand) {
@@ -518,6 +544,9 @@
         placeHandSprite(end.file, end.x, end.y, end.w, end.h, 0));
       if (beat.icon_scale) {
         animateIconScale(beat.icon_scale);
+      }
+      if (beat.erase_relabel) {
+        animateEraseAndRelabel(beat.erase_relabel);
       }
     } else if (beat.mode === 'swipe' && beat.hand_sweep) {
       // FIXED: this was never actually dispatched before — swipe mode

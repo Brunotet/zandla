@@ -315,6 +315,13 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
     # the CURRENT (most recently drawn) one for a given concept_key, so
     # point/zoom_in/zoom_out can still find the right icon to reference.
     concept_group_ids = {}
+    # NEW: parallel tracker for the erase+relabel feature — maps a
+    # concept_key to the DOM group holding its associated WORD (from an
+    # icon_word beat), not the icon itself. Only populated for single
+    # icon_word beats (not multi-item) for now. Empty unless that
+    # feature is actually used, so it changes nothing for beats that
+    # don't reference it.
+    concept_label_group_ids = {}
 
     def _apply_camera_move(beat_out_ref, beat_ref, region_ref, action, skip_transition=False):
         """Moves the camera toward region_ref (or the default wide view
@@ -755,11 +762,18 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             # vertical midpoint the icon is centered on.
             text_y = text_region["y"] + (text_region["h"] - font_size) / 2
             stroke_info = text_to_path.text_to_strokes(label, x=text_x, y=text_y, font_size=font_size)
+            label_group_id = f"label-{beat['beat_id']}"
+            if beat.get("concept_key"):
+                concept_label_group_ids[beat["concept_key"]] = label_group_id
             sub_visuals.append({
                 "beat_id": f"{beat['beat_id']}-label",
                 "subpaths": stroke_info["subpaths"],
                 "stroke_width": max(1.5, font_size * 0.045),
                 "path_transform": None,
+                "icon_group_id": label_group_id,  # reuses the same generic
+                # "parent this path under a named <g>" mechanism the
+                # template already has for icons — works identically
+                # for a label's paths, just under a different id prefix.
                 "start": beat["start"] + half,
                 "end": beat["end"],
             })
@@ -851,11 +865,10 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             direction = "in" if beat["mode"] == "zoom_in" else "out"
             target_x = region["x"] + region["w"] / 2
             th = region["h"] * 0.5
-            # BELOW the icon, not centered on/beside it — the pinch
-            # hand's own anchor point is placed this far past the
-            # region's bottom edge (half its own height + a gap) so it
-            # sits clearly underneath instead of overlapping the icon.
-            target_y = region["y"] + region["h"] + th * 0.55
+            # FIXED per feedback: was too far below the icon (0.55x)
+            # — now much closer, so the pinching fingers land right at
+            # the icon's own bottom edge instead of clearly underneath it.
+            target_y = region["y"] + region["h"] + th * 0.12
             start_hand, end_hand = gesture_engine.zoom_swap_pair(direction=direction, target_height=th)
             swap_at = (beat["start"] + beat["end"]) / 2
             beat_out["hand_swap"] = {
@@ -889,6 +902,67 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                         "scale": ICON_ENLARGE_SCALE if beat["mode"] == "zoom_in" else 1.0,
                         "swap_at": swap_at,
                         "duration": max(0.2, (beat["end"] - beat["start"]) / 2),
+                    }
+
+                # NEW, OPT-IN FEATURE: if this beat provides "new_label"
+                # AND the concept being zoomed into had a word written
+                # next to it (from an icon_word beat), erase that old
+                # word and write a fresh one specific to THIS sentence.
+                # Only activates when BOTH conditions hold — any beat
+                # that doesn't set "new_label" is completely unaffected,
+                # identical to before this feature existed.
+                new_label = (beat.get("new_label") or "").strip()
+                old_label_group_id = concept_label_group_ids.get(ck)
+                original_region = concept_regions.get(ck)
+                if new_label and old_label_group_id and original_region:
+                    # Recompute the SAME icon/label split math the
+                    # original icon_word beat used, so the new word
+                    # lands exactly where the old one was.
+                    _icon_w = original_region["w"] * 0.42
+                    _gutter = original_region["w"] * 0.06
+                    old_label_region = {
+                        "x": original_region["x"] + _icon_w + _gutter,
+                        "y": original_region["y"],
+                        "w": original_region["w"] - _icon_w - _gutter,
+                        "h": original_region["h"],
+                    }
+                    erase_hand_data = gesture_engine.scaled_erase_zone(
+                        target_height=old_label_region["h"] * 0.6
+                    )
+                    erase_target_x = old_label_region["x"] + old_label_region["w"] / 2
+                    erase_target_y = old_label_region["y"] + old_label_region["h"] / 2
+                    erase_start = swap_at  # right as the pinch settles into its enlarged state
+                    erase_duration = 0.5
+
+                    pad = 0.15
+                    usable_w = old_label_region["w"] * (1 - 2 * pad)
+                    usable_h = old_label_region["h"] * (1 - 2 * pad)
+                    font_size = text_to_path.fit_font_size(new_label, usable_w, usable_h)
+                    text_x = old_label_region["x"] + old_label_region["w"] * pad
+                    text_y = old_label_region["y"] + (old_label_region["h"] - font_size) / 2
+                    stroke_info = text_to_path.text_to_strokes(new_label, x=text_x, y=text_y, font_size=font_size)
+
+                    beat_out["erase_relabel"] = {
+                        "erase_hand": {
+                            "file": erase_hand_data["file"],
+                            "w": erase_hand_data["w"], "h": erase_hand_data["h"],
+                            "x": erase_target_x - erase_hand_data["zone_cx"],
+                            "y": erase_target_y - erase_hand_data["zone_cy"],
+                        },
+                        "erase_start": erase_start,
+                        "erase_duration": erase_duration,
+                        "old_label_group_id": old_label_group_id,
+                        "new_label_hand": gesture_engine.scaled_hand(
+                            "write", target_height=old_label_region["h"] * 0.55
+                        ).to_dict(),
+                        "new_label_subvisual": {
+                            "beat_id": f"{beat['beat_id']}-relabel",
+                            "subpaths": stroke_info["subpaths"],
+                            "stroke_width": max(1.5, font_size * 0.045),
+                            "path_transform": None,
+                            "start": erase_start + erase_duration,
+                            "end": erase_start + erase_duration + max(0.6, len(new_label) * 0.08),
+                        },
                     }
             _apply_camera_move(beat_out, beat, region, beat["mode"])
 
