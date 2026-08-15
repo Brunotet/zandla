@@ -409,6 +409,18 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
         region = board_layout.get(beat["beat_id"])
         if region and beat.get("concept_key"):
             concept_regions[beat["concept_key"]] = region
+        # BUG FIXED (confirmed from an actual failed render): the check
+        # above only covers a beat's TOP-LEVEL concept_key — multi-item
+        # icon_word beats don't have one (items replaces it), so any
+        # concept_key drawn INSIDE an items array was never registered
+        # here, even though it genuinely was drawn. A later point/
+        # zoom_in referencing that concept_key failed with "nothing was
+        # drawn earlier", which was wrong — something WAS drawn, this
+        # registration step just never knew about it.
+        if region and beat.get("items"):
+            for item in beat["items"]:
+                if item.get("type") == "icon" and item.get("concept_key"):
+                    concept_regions[item["concept_key"]] = region
         if region is None and beat["mode"] in ("point", "zoom_in", "zoom_out"):
             ck = beat.get("concept_key")
             region = concept_regions.get(ck)
