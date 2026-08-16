@@ -34,7 +34,7 @@ REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 # How much bigger a pinched-in icon gets, relative to its original
 # drawn size. Tune this single number if "enlarge" should read as
 # more/less dramatic — nothing else needs to change.
-ICON_ENLARGE_SCALE = 1.45  # reduced from 1.9 — was overflowing off-canvas on pinch-enlarge
+ICON_ENLARGE_SCALE = 1.25  # reduced further (was 1.45) — still too big per feedback
 ICON_STROKE_TARGET_PX = 6.0  # numerator for scale-compensated stroke width (stroke_width =
                               # this / icon_path_info["scale"]) so the FINAL on-screen width
                               # lands near this many pixels regardless of the icon's fit-scale.
@@ -163,6 +163,12 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
     frame = get_frame_dims(orientation)
     target_aspect = frame["width"] / frame["height"]
     CONTENT_W, CONTENT_H = 420, 320  # unchanged content box size for a single-item slot
+    MAX_ITEM_ROWS = 3  # icon_word "items" pairs: 2/4/6 entries -> 1/2/3 stacked rows
+
+    def _row_count_for_beat(b: dict) -> int:
+        if b.get("mode") == "icon_word" and b.get("items"):
+            return max(1, min(MAX_ITEM_ROWS, len(b["items"]) // 2))
+        return 1
 
     # SPACING BUG, FULLY FIXED THIS TIME — last pass only corrected
     # ROW spacing (vertical) and missed that COLUMN spacing (horizontal)
@@ -176,9 +182,19 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
     # math the camera itself uses), plus a safety margin, so no
     # adjacent slot in either direction is ever inside the same shot.
     fitted = _fit_aspect(region_for_bbox({"x": 0, "y": 0, "w": CONTENT_W, "h": CONTENT_H}, padding=60), target_aspect)
-    SAFETY_MARGIN = 350
+    SAFETY_MARGIN = 550  # increased again (was 350) per direct feedback that bleed was
+                          # still visible — trusting the report over my own math this time
     SLOT_W = max(500, fitted["w"] + SAFETY_MARGIN)
-    SLOT_H = max(400, fitted["h"] + SAFETY_MARGIN)
+    # SLOT_H sized for the TALLEST beat that can land in a row — a
+    # multi-row icon_word beat (up to MAX_ITEM_ROWS stacked pairs) needs
+    # up to 3x the standard content height. Without this, a tall beat's
+    # camera footprint would extend past a row spacing sized only for
+    # the ordinary single-row case, bleeding into the row below — same
+    # class of bug as the column one above, triggered by height instead
+    # of width.
+    _tall_content_h = CONTENT_H * MAX_ITEM_ROWS + (CONTENT_H * 0.05) * (MAX_ITEM_ROWS - 1)
+    _tall_fitted = _fit_aspect(region_for_bbox({"x": 0, "y": 0, "w": CONTENT_W, "h": _tall_content_h}, padding=60), target_aspect)
+    SLOT_H = max(400, _tall_fitted["h"] + SAFETY_MARGIN)
 
     # SECOND, SEPARATE SPACING BUG FOUND AND FIXED — the one above
     # (SLOT_W/SLOT_H sized from the camera's single-slot footprint)
@@ -194,7 +210,7 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
     # comes from padding applied to a narrow sub-cell, not from slot
     # width itself. What DOES close it (verified): literal extra space
     # inserted directly BETWEEN slots, on top of SLOT_W.
-    INTER_SLOT_GAP = 180
+    INTER_SLOT_GAP = 320  # increased again (was 180) alongside the safety margin bump above
 
     SLOT_PITCH_W = SLOT_W + INTER_SLOT_GAP
     SLOT_PITCH_H = SLOT_H + INTER_SLOT_GAP
@@ -233,7 +249,14 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
         row = slot_i // COLS
         base_x = MARGIN + col * SLOT_PITCH_W
         base_y = MARGIN + row * SLOT_PITCH_H
-        full_w, full_h = CONTENT_W, CONTENT_H
+        # Content height scales with the tallest beat in this chunk's
+        # own row requirement (multi-row icon_word items) — a chunk is
+        # almost always size 1 when items are used (grouping AND
+        # multi-row items on the same beat would be unusual), but this
+        # stays correct either way.
+        chunk_rows = max(_row_count_for_beat(b) for b in chunk)
+        full_w = CONTENT_W
+        full_h = CONTENT_H * chunk_rows + (CONTENT_H * 0.05) * (chunk_rows - 1) if chunk_rows > 1 else CONTENT_H
 
         items = chunk[:MAX_ITEMS_PER_SLOT]
         n = len(items)
@@ -558,84 +581,89 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             _apply_camera_move(beat_out, beat, region, "zoom_in")
 
         elif beat["mode"] == "icon_word" and region and beat.get("items"):
-            # NEW: 2-4 icons/words sharing ONE beat's region, side by
-            # side, e.g. "food [icon] = [icon] good [word]". Purely
-            # additive — reuses the exact same primitives every other
-            # mode already relies on (resolve_beat_asset, icon_to_path_d,
-            # text_to_strokes, animateStrokeReveal/animateMaskWipe via
-            # sub_visuals/illustration_items) rather than inventing a
-            # new rendering path. A script that never sets "items" never
-            # reaches this branch at all — the single icon+label path
-            # right below is completely untouched.
-            items = beat["items"][:4]
-            if len(items) < 2:
+            # REWRITTEN per direct feedback: items are no longer a
+            # single horizontal strip of mixed icon/word cells — only
+            # icon,word PAIRS are valid now (icon first, word second,
+            # never word-word, icon-icon, or word-icon), each pair
+            # forming its own ROW, stacked vertically. "icon-word" per
+            # row, "icon-word" on the row below it, and so on for as
+            # many pairs as the sentence has (capped at 3 rows / 6
+            # items so a single beat's region doesn't get overcrowded).
+            items = beat["items"][:6]
+            if len(items) < 2 or len(items) % 2 != 0:
                 raise RuntimeError(
-                    f"beat_id={beat['beat_id']}: mode='icon_word' with 'items' needs 2-4 entries, got {len(items)}"
+                    f"beat_id={beat['beat_id']}: mode='icon_word' with 'items' needs an EVEN number of "
+                    f"entries (2, 4, or 6) forming icon,word pairs — got {len(items)}"
                 )
-            n = len(items)
-            item_gap = region["w"] * 0.03
-            cell_w = (region["w"] - item_gap * (n - 1)) / n
-            per_item_duration = (beat["end"] - beat["start"]) / n
-            # Each item's OWN reveal is capped short (like a single
-            # icon_word icon-half) so it finishes fast within its slice
-            # instead of stretching to fill it — same reasoning as the
-            # min_reveal_duration fix elsewhere.
-            per_item_reveal = min(per_item_duration, 0.9)
+            pairs = []
+            for i in range(0, len(items), 2):
+                icon_item, word_item = items[i], items[i + 1]
+                if icon_item.get("type", "icon") != "icon" or word_item.get("type") != "word":
+                    raise RuntimeError(
+                        f"beat_id={beat['beat_id']}: items[{i}]/items[{i+1}] must be an icon,word pair "
+                        f"in that exact order — got types {icon_item.get('type')!r}, {word_item.get('type')!r}"
+                    )
+                pairs.append((icon_item, word_item))
+
+            n_rows = len(pairs)
+            row_gap = region["h"] * 0.05
+            row_h = (region["h"] - row_gap * (n_rows - 1)) / n_rows
+
+            # Same fast/buffered timing fix as the single icon_word
+            # branch below — each row's icon+word finishes quickly
+            # instead of stretching to fill its slice, and the total
+            # across ALL rows still leaves real buffer before the beat
+            # ends (and the swipe fires).
+            _buffer = 1.1
+            _beat_duration = max(0.01, beat["end"] - beat["start"])
+            _usable = max(1.0, _beat_duration - _buffer)
+            per_row_duration = _usable / n_rows
+            icon_duration = min(0.9, per_row_duration * 0.45)
+            word_duration = min(0.9, per_row_duration * 0.45)
 
             sub_visuals = []
             illustration_items = []
             beat_out["region"] = region
 
-            for idx, item in enumerate(items):
-                cell_x = region["x"] + idx * (cell_w + item_gap)
-                cell_region = {"x": cell_x, "y": region["y"], "w": cell_w, "h": region["h"]}
-                item_start = beat["start"] + idx * per_item_duration
-                item_type = item.get("type", "icon")
+            for row_idx, (icon_item, word_item) in enumerate(pairs):
+                row_y = region["y"] + row_idx * (row_h + row_gap)
+                row_region = {"x": region["x"], "y": row_y, "w": region["w"], "h": row_h}
+                icon_w = row_region["w"] * 0.42
+                gutter = row_region["w"] * 0.06
+                icon_region = {"x": row_region["x"], "y": row_region["y"], "w": icon_w, "h": row_region["h"]}
+                word_region = {
+                    "x": row_region["x"] + icon_w + gutter, "y": row_region["y"],
+                    "w": row_region["w"] - icon_w - gutter, "h": row_region["h"],
+                }
+                row_start = beat["start"] + row_idx * per_row_duration
+                icon_start_t = row_start
+                icon_end_t = icon_start_t + icon_duration
+                word_start_t = icon_end_t
+                word_end_t = word_start_t + word_duration
 
-                if item_type == "word":
-                    label = (item.get("label") or "").strip()
-                    if not label:
-                        raise RuntimeError(f"beat_id={beat['beat_id']}: items[{idx}] type='word' needs a non-empty 'label'")
-                    pad = 0.15
-                    usable_w = cell_region["w"] * (1 - 2 * pad)
-                    usable_h = cell_region["h"] * (1 - 2 * pad)
-                    font_size = text_to_path.fit_font_size(label, usable_w, usable_h)
-                    text_x = cell_region["x"] + cell_region["w"] * pad
-                    text_y = cell_region["y"] + (cell_region["h"] - font_size) / 2
-                    stroke_info = text_to_path.text_to_strokes(label, x=text_x, y=text_y, font_size=font_size)
-                    sub_visuals.append({
-                        "beat_id": f"{beat['beat_id']}-item{idx}",
-                        "subpaths": stroke_info["subpaths"],
-                        "stroke_width": max(1.5, font_size * 0.045),
-                        "path_transform": None,
-                        "start": item_start,
-                        "end": item_start + per_item_reveal,
-                    })
-                    continue
-
-                concept_key = (item.get("concept_key") or "").strip()
+                concept_key = (icon_item.get("concept_key") or "").strip()
                 if not concept_key:
-                    raise RuntimeError(f"beat_id={beat['beat_id']}: items[{idx}] type='icon' needs a 'concept_key'")
+                    raise RuntimeError(f"beat_id={beat['beat_id']}: items[{row_idx*2}] (icon) needs a 'concept_key'")
                 item_asset_entry = resolve_beat_asset(
-                    {"concept_key": concept_key, "beat_id": f"{beat['beat_id']}-item{idx}"},
+                    {"concept_key": concept_key, "beat_id": f"{beat['beat_id']}-row{row_idx}"},
                     channel, illustration_cache_dir,
                 )
-                print(f"[render_pipeline] beat_id={beat['beat_id']} items[{idx}] concept_key={concept_key!r} "
+                print(f"[render_pipeline] beat_id={beat['beat_id']} row{row_idx} concept_key={concept_key!r} "
                       f"-> resolved: source={item_asset_entry.get('asset_source')}")
 
                 if item_asset_entry.get("draw_style") == "stroke_reveal":
                     svg_path = item_asset_entry["asset_ref"].get("path")
-                    icon_path_info = svg_to_path.icon_to_path_d(svg_path, cell_region) if svg_path else None
+                    icon_path_info = svg_to_path.icon_to_path_d(svg_path, icon_region) if svg_path else None
                     if icon_path_info is None:
                         raise RuntimeError(
-                            f"beat_id={beat['beat_id']}: items[{idx}] concept_key={concept_key!r} resolved to an "
-                            f"icon with no usable <path> data — pick a different concept_key for this item."
+                            f"beat_id={beat['beat_id']}: row{row_idx} concept_key={concept_key!r} resolved to an "
+                            f"icon with no usable <path> data — pick a different concept_key for this row."
                         )
-                    icon_group_id = f"icon-{beat['beat_id']}-item{idx}"
+                    icon_group_id = f"icon-{beat['beat_id']}-row{row_idx}"
                     concept_group_ids[concept_key] = icon_group_id
                     stroke_w = max(0.3, min(3.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"]))
                     sub_visuals.append({
-                        "beat_id": f"{beat['beat_id']}-item{idx}",
+                        "beat_id": f"{beat['beat_id']}-row{row_idx}-icon",
                         "subpaths": icon_path_info["subpaths"],
                         "stroke_width": stroke_w,
                         "stroke_width_final": stroke_w * icon_path_info["scale"],
@@ -644,28 +672,48 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                         "path_offset_y": icon_path_info["offset_y"],
                         "path_scale": icon_path_info["scale"],
                         "icon_group_id": icon_group_id,
-                        "start": item_start,
-                        "end": item_start + per_item_reveal,
-                        "min_reveal_duration": per_item_reveal,
+                        "start": icon_start_t,
+                        "end": icon_end_t,
+                        "min_reveal_duration": icon_duration,
                     })
                 else:
-                    icon_group_id = f"icon-{beat['beat_id']}-item{idx}"
+                    icon_group_id = f"icon-{beat['beat_id']}-row{row_idx}"
                     concept_group_ids[concept_key] = icon_group_id
                     illustration_items.append({
-                        "beat_id": f"{beat['beat_id']}-item{idx}-illus",
+                        "beat_id": f"{beat['beat_id']}-row{row_idx}-illus",
                         "illustration_path": item_asset_entry["asset_ref"].get("cached_path"),
-                        "illustration_region": cell_region,
-                        "illustration_start": item_start,
-                        "illustration_end": item_start + per_item_reveal,
+                        "illustration_region": icon_region,
+                        "illustration_start": icon_start_t,
+                        "illustration_end": icon_end_t,
                         "mask_wipe_hand": gesture_engine.scaled_hand(
-                            "drag", target_height=cell_region["h"] * 0.5
+                            "drag", target_height=icon_region["h"] * 0.5
                         ).to_dict(),
                     })
+
+                label = (word_item.get("label") or "").strip()
+                if not label:
+                    raise RuntimeError(f"beat_id={beat['beat_id']}: items[{row_idx*2+1}] (word) needs a non-empty 'label'")
+                pad = 0.15
+                usable_w = word_region["w"] * (1 - 2 * pad)
+                usable_h = word_region["h"] * (1 - 2 * pad)
+                font_size = text_to_path.fit_font_size(label, usable_w, usable_h)
+                text_x = word_region["x"] + word_region["w"] * pad
+                text_y = word_region["y"] + (word_region["h"] - font_size) / 2
+                stroke_info = text_to_path.text_to_strokes(label, x=text_x, y=text_y, font_size=font_size)
+                sub_visuals.append({
+                    "beat_id": f"{beat['beat_id']}-row{row_idx}-word",
+                    "subpaths": stroke_info["subpaths"],
+                    "stroke_width": max(1.5, font_size * 0.045),
+                    "path_transform": None,
+                    "start": word_start_t,
+                    "end": word_end_t,
+                    "min_reveal_duration": word_duration,
+                })
 
             beat_out["sub_visuals"] = sub_visuals
             if illustration_items:
                 beat_out["illustration_items"] = illustration_items
-            target_height = region["h"] * 0.55
+            target_height = (region["h"] / max(1, n_rows)) * 0.5
             beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
             _apply_camera_move(beat_out, beat, region, "zoom_in")
@@ -689,7 +737,24 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             print(f"[render_pipeline] beat_id={beat['beat_id']} icon_word concept_key={beat.get('concept_key')!r} "
                   f"label={label!r} -> resolved: source={asset_entry.get('asset_source')}")
 
-            half = (beat["end"] - beat["start"]) / 2
+            # BUG FIXED (confirmed from the report): icon/label timing
+            # used to split the beat's FULL duration in half, with the
+            # label always ending at EXACTLY beat['end'] — zero buffer
+            # before the swipe, regardless of how long the sentence's
+            # narration actually was. Icon and label now each get a
+            # fast, capped duration, and the total is bounded well under
+            # the full beat span — guaranteeing real buffer before the
+            # swipe fires, the same way plain "write" mode already does.
+            _icon_word_buffer = 1.1
+            _beat_duration = max(0.01, beat["end"] - beat["start"])
+            _usable = max(1.0, _beat_duration - _icon_word_buffer)
+            icon_duration = min(0.9, _usable * 0.45)
+            label_duration = min(0.9, _usable * 0.45)
+            icon_start_t = beat["start"]
+            icon_end_t = icon_start_t + icon_duration
+            label_start_t = icon_end_t
+            label_end_t = label_start_t + label_duration
+
             sub_visuals = []
 
             if asset_entry.get("draw_style") == "stroke_reveal":
@@ -730,9 +795,9 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                     "path_offset_y": icon_path_info["offset_y"],
                     "path_scale": icon_path_info["scale"],
                     "icon_group_id": icon_group_id,
-                    "start": beat["start"],
-                    "end": beat["start"] + half,
-                    "min_reveal_duration": 0.6,
+                    "start": icon_start_t,
+                    "end": icon_end_t,
+                    "min_reveal_duration": icon_duration,
                 })
             else:
                 # mask_wipe illustration fallback — no pen-stroke reveal available for this
@@ -741,8 +806,8 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 # 'drag' hand tracking the reveal edge, matching the draw-mode fix.
                 beat_out["illustration_path"] = asset_entry["asset_ref"].get("cached_path")
                 beat_out["illustration_region"] = icon_region
-                beat_out["illustration_start"] = beat["start"]
-                beat_out["illustration_end"] = beat["start"] + half
+                beat_out["illustration_start"] = icon_start_t
+                beat_out["illustration_end"] = icon_end_t
                 beat_out["mask_wipe_hand"] = gesture_engine.scaled_hand(
                     "drag", target_height=icon_region["h"] * 0.5
                 ).to_dict()
@@ -774,8 +839,9 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 # "parent this path under a named <g>" mechanism the
                 # template already has for icons — works identically
                 # for a label's paths, just under a different id prefix.
-                "start": beat["start"] + half,
-                "end": beat["end"],
+                "start": label_start_t,
+                "end": label_end_t,
+                "min_reveal_duration": label_duration,
             })
 
             beat_out["sub_visuals"] = sub_visuals
@@ -868,7 +934,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             # FIXED per feedback: was too far below the icon (0.55x)
             # — now much closer, so the pinching fingers land right at
             # the icon's own bottom edge instead of clearly underneath it.
-            target_y = region["y"] + region["h"] + th * 0.12
+            target_y = region["y"] + region["h"] + th * 0.02
             start_hand, end_hand = gesture_engine.zoom_swap_pair(direction=direction, target_height=th)
             swap_at = (beat["start"] + beat["end"]) / 2
             beat_out["hand_swap"] = {

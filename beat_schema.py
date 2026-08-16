@@ -70,25 +70,29 @@ def validate_beat(beat: dict, index: int) -> None:
 
     if has_items:
         items = beat["items"]
-        if not isinstance(items, list) or not (2 <= len(items) <= 4):
+        if not isinstance(items, list) or len(items) < 2 or len(items) > 6 or len(items) % 2 != 0:
             raise BeatValidationError(
-                f"beat[{index}] (id={beat['beat_id']}) mode='icon_word' with 'items' needs a list of "
-                f"2-4 entries, got {items!r}"
+                f"beat[{index}] (id={beat['beat_id']}) mode='icon_word' with 'items' needs an EVEN "
+                f"number of entries (2, 4, or 6) forming icon,word pairs — got {items!r}"
             )
-        for item_idx, item in enumerate(items):
-            item_type = item.get("type", "icon")
-            if item_type not in ("icon", "word"):
+        for pair_idx in range(0, len(items), 2):
+            icon_item, word_item = items[pair_idx], items[pair_idx + 1]
+            icon_type = icon_item.get("type", "icon")
+            word_type = word_item.get("type")
+            if icon_type != "icon" or word_type != "word":
                 raise BeatValidationError(
-                    f"beat[{index}] (id={beat['beat_id']}) items[{item_idx}] has invalid type "
-                    f"'{item_type}', must be 'icon' or 'word'"
+                    f"beat[{index}] (id={beat['beat_id']}) items[{pair_idx}]/items[{pair_idx+1}] must be "
+                    f"an icon,word pair in that exact order (icon first, word second) — got types "
+                    f"{icon_type!r}, {word_type!r}. Patterns like icon-word-word, word-word-icon, or "
+                    f"word-icon-word are not valid — every pair is icon,word, forming one row."
                 )
-            if item_type == "icon" and not str(item.get("concept_key", "")).strip():
+            if not str(icon_item.get("concept_key", "")).strip():
                 raise BeatValidationError(
-                    f"beat[{index}] (id={beat['beat_id']}) items[{item_idx}] type='icon' requires a concept_key"
+                    f"beat[{index}] (id={beat['beat_id']}) items[{pair_idx}] (icon) requires a concept_key"
                 )
-            if item_type == "word" and not str(item.get("label", "")).strip():
+            if not str(word_item.get("label", "")).strip():
                 raise BeatValidationError(
-                    f"beat[{index}] (id={beat['beat_id']}) items[{item_idx}] type='word' requires a non-empty label"
+                    f"beat[{index}] (id={beat['beat_id']}) items[{pair_idx+1}] (word) requires a non-empty label"
                 )
 
     if not beat["text"].strip():
