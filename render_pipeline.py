@@ -606,7 +606,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 pairs.append((icon_item, word_item))
 
             n_rows = len(pairs)
-            row_gap = region["h"] * 0.05
+            row_gap = region["h"] * 0.015
             row_h = (region["h"] - row_gap * (n_rows - 1)) / n_rows
 
             # Same fast/buffered timing fix as the single icon_word
@@ -934,7 +934,13 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             # FIXED per feedback: was too far below the icon (0.55x)
             # — now much closer, so the pinching fingers land right at
             # the icon's own bottom edge instead of clearly underneath it.
-            target_y = region["y"] + region["h"] + th * 0.02
+            # NOTE: can't make this fully precise without hand-gestures.json
+            # (need the pinch gesture's actual anchor_frac to know which
+            # pixel of the hand image "target_y" actually lands at — see
+            # placement_at() in gesture_engine.py). Best-effort in the
+            # meantime: target lands exactly AT the icon's bottom edge,
+            # not below it.
+            target_y = region["y"] + region["h"]
             start_hand, end_hand = gesture_engine.zoom_swap_pair(direction=direction, target_height=th)
             swap_at = (beat["start"] + beat["end"]) / 2
             beat_out["hand_swap"] = {
