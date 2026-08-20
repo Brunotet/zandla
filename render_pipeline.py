@@ -163,6 +163,12 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
     frame = get_frame_dims(orientation)
     target_aspect = frame["width"] / frame["height"]
     CONTENT_W, CONTENT_H = 420, 320  # unchanged content box size for a single-item slot
+    ROW_CONTENT_H = 230  # compact, FIXED row height for multi-row icon_word "items" — NOT
+                          # stretched to fill the (intentionally oversized, for bleed-
+                          # prevention) allocated region. That stretch was the actual root
+                          # cause of "rows too far apart": each row became much taller than
+                          # its content needed, with icon+word centered in mostly-dead space.
+    ROW_GAP_FIXED = 16    # small fixed gap between rows, not a percentage of region height
     MAX_ITEM_ROWS = 3  # icon_word "items" pairs: 2/4/6 entries -> 1/2/3 stacked rows
 
     def _row_count_for_beat(b: dict) -> int:
@@ -192,7 +198,7 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
     # the ordinary single-row case, bleeding into the row below — same
     # class of bug as the column one above, triggered by height instead
     # of width.
-    _tall_content_h = CONTENT_H * MAX_ITEM_ROWS + (CONTENT_H * 0.05) * (MAX_ITEM_ROWS - 1)
+    _tall_content_h = ROW_CONTENT_H * MAX_ITEM_ROWS + ROW_GAP_FIXED * (MAX_ITEM_ROWS - 1)
     _tall_fitted = _fit_aspect(region_for_bbox({"x": 0, "y": 0, "w": CONTENT_W, "h": _tall_content_h}, padding=60), target_aspect)
     SLOT_H = max(400, _tall_fitted["h"] + SAFETY_MARGIN)
 
@@ -256,7 +262,7 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
         # stays correct either way.
         chunk_rows = max(_row_count_for_beat(b) for b in chunk)
         full_w = CONTENT_W
-        full_h = CONTENT_H * chunk_rows + (CONTENT_H * 0.05) * (chunk_rows - 1) if chunk_rows > 1 else CONTENT_H
+        full_h = ROW_CONTENT_H * chunk_rows + ROW_GAP_FIXED * (chunk_rows - 1) if chunk_rows > 1 else CONTENT_H
 
         items = chunk[:MAX_ITEMS_PER_SLOT]
         n = len(items)
@@ -345,6 +351,12 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
     # feature is actually used, so it changes nothing for beats that
     # don't reference it.
     concept_label_group_ids = {}
+    # NEW: sound effect cues — {"file": "...", "start": absolute_seconds}
+    # collected as beats are processed, exported at the end for
+    # run_render.py to mix into the final audio track. Purely additive:
+    # if the sound files aren't present at render time, run_render.py
+    # skips missing ones rather than failing the render.
+    sound_cues = []
 
     def _apply_camera_move(beat_out_ref, beat_ref, region_ref, action, skip_transition=False):
         """Moves the camera toward region_ref (or the default wide view
@@ -412,6 +424,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 sweep["start"] = move_arrival - sweep_duration
                 sweep["duration"] = sweep_duration
                 beat_out_ref["camera_transition"] = sweep
+                sound_cues.append({"file": "woosh.mp3", "start": sweep["start"]})
 
         camera_free_at = beat_ref["end"]
         last_camera_center = target_center
@@ -480,6 +493,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             font_size = text_to_path.fit_font_size_wrapped(beat["text"], usable_w, usable_h)
             text_x = region["x"] + region["w"] * pad
             text_y = region["y"] + region["h"] * pad
+            sound_cues.append({"file": "wrighting.mp3", "start": beat["start"]})
             stroke_info = text_to_path.text_to_strokes_wrapped(
                 beat["text"], x=text_x, y=text_y, font_size=font_size, max_width=usable_w
             )
@@ -606,8 +620,8 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 pairs.append((icon_item, word_item))
 
             n_rows = len(pairs)
-            row_gap = region["h"] * 0.015
-            row_h = (region["h"] - row_gap * (n_rows - 1)) / n_rows
+            row_gap = ROW_GAP_FIXED
+            row_h = ROW_CONTENT_H
 
             # Same fast/buffered timing fix as the single icon_word
             # branch below — each row's icon+word finishes quickly
@@ -628,8 +642,8 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             for row_idx, (icon_item, word_item) in enumerate(pairs):
                 row_y = region["y"] + row_idx * (row_h + row_gap)
                 row_region = {"x": region["x"], "y": row_y, "w": region["w"], "h": row_h}
-                icon_w = row_region["w"] * 0.42
-                gutter = row_region["w"] * 0.06
+                icon_w = row_region["w"] * 0.46  # increased from 0.42 — icons/images were reading small
+                gutter = row_region["w"] * 0.05
                 icon_region = {"x": row_region["x"], "y": row_region["y"], "w": icon_w, "h": row_region["h"]}
                 word_region = {
                     "x": row_region["x"] + icon_w + gutter, "y": row_region["y"],
@@ -640,6 +654,8 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 icon_end_t = icon_start_t + icon_duration
                 word_start_t = icon_end_t
                 word_end_t = word_start_t + word_duration
+                sound_cues.append({"file": "drawing.mp3", "start": icon_start_t})
+                sound_cues.append({"file": "wrighting.mp3", "start": word_start_t})
 
                 concept_key = (icon_item.get("concept_key") or "").strip()
                 if not concept_key:
@@ -653,7 +669,9 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
 
                 if item_asset_entry.get("draw_style") == "stroke_reveal":
                     svg_path = item_asset_entry["asset_ref"].get("path")
-                    icon_path_info = svg_to_path.icon_to_path_d(svg_path, icon_region) if svg_path else None
+                    # Reduced padding (was default 0.15) — icons were reading small; less
+                    # internal padding means the icon fills more of its allotted box.
+                    icon_path_info = svg_to_path.icon_to_path_d(svg_path, icon_region, padding_ratio=0.08) if svg_path else None
                     if icon_path_info is None:
                         raise RuntimeError(
                             f"beat_id={beat['beat_id']}: row{row_idx} concept_key={concept_key!r} resolved to an "
@@ -677,16 +695,31 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                         "min_reveal_duration": icon_duration,
                     })
                 else:
+                    # IMAGES SPECIFICALLY ENLARGED per direct feedback — a
+                    # photo/illustration reads noticeably smaller/less bold
+                    # than a bold vector icon line at the identical box size,
+                    # so images get their own bigger region here, grown
+                    # around the same center point rather than reusing the
+                    # vector icon's box as-is.
+                    _img_scale = 1.3
+                    _cx = icon_region["x"] + icon_region["w"] / 2
+                    _cy = icon_region["y"] + icon_region["h"] / 2
+                    image_region = {
+                        "x": _cx - (icon_region["w"] * _img_scale) / 2,
+                        "y": _cy - (icon_region["h"] * _img_scale) / 2,
+                        "w": icon_region["w"] * _img_scale,
+                        "h": icon_region["h"] * _img_scale,
+                    }
                     icon_group_id = f"icon-{beat['beat_id']}-row{row_idx}"
                     concept_group_ids[concept_key] = icon_group_id
                     illustration_items.append({
                         "beat_id": f"{beat['beat_id']}-row{row_idx}-illus",
                         "illustration_path": item_asset_entry["asset_ref"].get("cached_path"),
-                        "illustration_region": icon_region,
+                        "illustration_region": image_region,
                         "illustration_start": icon_start_t,
                         "illustration_end": icon_end_t,
                         "mask_wipe_hand": gesture_engine.scaled_hand(
-                            "drag", target_height=icon_region["h"] * 0.5
+                            "drag", target_height=image_region["h"] * 0.5
                         ).to_dict(),
                     })
 
@@ -719,11 +752,12 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             _apply_camera_move(beat_out, beat, region, "zoom_in")
 
         elif beat["mode"] == "icon_word" and region:
-            # Left ~42% of this beat's region for the icon, right side
+            # Left ~46% of this beat's region for the icon, right side
             # for the short written label — NOT the full sentence, just
             # the label field (e.g. concept_key="food", label="good").
-            gutter = region["w"] * 0.06
-            icon_w = region["w"] * 0.42
+            # Increased from 0.42/0.06 — icon/image was reading small.
+            gutter = region["w"] * 0.05
+            icon_w = region["w"] * 0.46
             icon_region = {"x": region["x"], "y": region["y"], "w": icon_w, "h": region["h"]}
             text_region = {
                 "x": region["x"] + icon_w + gutter, "y": region["y"],
@@ -754,12 +788,14 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             icon_end_t = icon_start_t + icon_duration
             label_start_t = icon_end_t
             label_end_t = label_start_t + label_duration
+            sound_cues.append({"file": "drawing.mp3", "start": icon_start_t})
+            sound_cues.append({"file": "wrighting.mp3", "start": label_start_t})
 
             sub_visuals = []
 
             if asset_entry.get("draw_style") == "stroke_reveal":
                 svg_path = asset_entry["asset_ref"].get("path")
-                icon_path_info = svg_to_path.icon_to_path_d(svg_path, icon_region) if svg_path else None
+                icon_path_info = svg_to_path.icon_to_path_d(svg_path, icon_region, padding_ratio=0.08) if svg_path else None
                 if icon_path_info is None:
                     raise RuntimeError(
                         f"beat_id={beat['beat_id']}: icon_word concept_key resolved to an icon with "
@@ -804,12 +840,23 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 # concept. FIXED: previously placed instantly with no reveal timing and no
                 # hand at all — now wipes in during the icon's own half of the beat, with a
                 # 'drag' hand tracking the reveal edge, matching the draw-mode fix.
+                # IMAGES ENLARGED (same as the row-based branch) — a photo reads noticeably
+                # smaller/less bold than a vector icon at the identical box size.
+                _img_scale = 1.3
+                _cx = icon_region["x"] + icon_region["w"] / 2
+                _cy = icon_region["y"] + icon_region["h"] / 2
+                image_region = {
+                    "x": _cx - (icon_region["w"] * _img_scale) / 2,
+                    "y": _cy - (icon_region["h"] * _img_scale) / 2,
+                    "w": icon_region["w"] * _img_scale,
+                    "h": icon_region["h"] * _img_scale,
+                }
                 beat_out["illustration_path"] = asset_entry["asset_ref"].get("cached_path")
-                beat_out["illustration_region"] = icon_region
+                beat_out["illustration_region"] = image_region
                 beat_out["illustration_start"] = icon_start_t
                 beat_out["illustration_end"] = icon_end_t
                 beat_out["mask_wipe_hand"] = gesture_engine.scaled_hand(
-                    "drag", target_height=icon_region["h"] * 0.5
+                    "drag", target_height=image_region["h"] * 0.5
                 ).to_dict()
 
             pad = 0.15
@@ -854,6 +901,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             asset_entry = resolve_beat_asset(beat, channel, illustration_cache_dir)
             beat_out["asset"] = asset_entry
             beat_out["region"] = region
+            sound_cues.append({"file": "drawing.mp3", "start": beat["start"]})
             print(f"[render_pipeline] beat_id={beat['beat_id']} concept_key={beat.get('concept_key')!r} "
                   f"-> resolved: source={asset_entry.get('asset_source')} "
                   f"ref={asset_entry.get('asset_ref')} draw_style={asset_entry.get('draw_style')}")
@@ -1047,6 +1095,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             sweep["start"] = camera_free_at
             sweep["duration"] = max(0.4, beat["end"] - beat["start"])
             beat_out["hand_sweep"] = sweep
+            sound_cues.append({"file": "woosh.mp3", "start": sweep["start"]})
             _apply_camera_move(beat_out, beat, None, "zoom_out", skip_transition=True)
 
         elif beat["mode"] == "talk":
@@ -1062,6 +1111,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
         "board": board,
         "camera_keyframes": json.loads(cam.gsap_keyframes_js()),
         "beats": scene_beats,
+        "sound_cues": sound_cues,
     }
 
 
