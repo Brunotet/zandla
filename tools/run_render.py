@@ -53,7 +53,7 @@ def main():
     video_no_audio = "/tmp/video_no_audio.webm"
 
     _capture_with_playwright(scene_path, duration, video_no_audio, scene["frame"])
-    _mux_audio(video_no_audio, scene["audio_path"], args.out)
+    _mux_audio_with_sfx(video_no_audio, scene["audio_path"], scene.get("sound_cues", []), args.out)
     print(f"[run_render] done -> {args.out}")
 
 
@@ -108,6 +108,76 @@ def _mux_audio(video_path: str, audio_path: str, out_path: str):
         "ffmpeg", "-y", "-i", video_path, "-i", audio_path,
         "-c:v", "libx264", "-c:a", "aac", "-shortest", out_path,
     ], check=True, capture_output=True)
+
+
+# soundeffect/ lives at the repo root (sibling of tools/), matching
+# drawing.mp3 / wrighting.mp3 / woosh.mp3 as uploaded.
+SOUNDEFFECT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "soundeffect")
+
+
+def _mux_audio_with_sfx(video_path: str, narration_path: str, sound_cues: list, out_path: str):
+    """Mixes drawing/writing/woosh sound-effect cues (from
+    render_pipeline.py's sound_cues, each an absolute-time cue) into
+    the narration track, muxed with the video. NEVER the reason a
+    render fails — falls back to the plain, already-proven _mux_audio
+    (narration only) at every possible failure point: no cues, no
+    soundeffect/ folder, a missing individual file, or the ffmpeg
+    mix itself erroring out for any reason.
+    """
+    if not sound_cues or not os.path.isdir(SOUNDEFFECT_DIR):
+        print("[run_render] no sound cues or soundeffect/ folder missing — narration-only mux")
+        _mux_audio(video_path, narration_path, out_path)
+        return
+
+    valid_cues = []
+    for cue in sound_cues:
+        sfx_path = os.path.join(SOUNDEFFECT_DIR, cue["file"])
+        if os.path.isfile(sfx_path):
+            valid_cues.append({"path": sfx_path, "start": max(0.0, cue["start"])})
+        else:
+            print(f"[run_render] sound cue file not found, skipping: {sfx_path}")
+
+    if not valid_cues:
+        print("[run_render] no valid sound-effect files found — narration-only mux")
+        _mux_audio(video_path, narration_path, out_path)
+        return
+
+    inputs = ["-i", video_path, "-i", narration_path]
+    filter_parts = []
+    mix_labels = ["[1:a]"]  # narration, kept at full volume
+    for i, cue in enumerate(valid_cues):
+        inputs += ["-i", cue["path"]]
+        input_idx = i + 2  # 0=video, 1=narration, 2.. = sfx clips in order
+        delay_ms = int(cue["start"] * 1000)
+        label = f"[sfx{i}]"
+        # Delayed to its cue time, volume reduced so it sits UNDER the
+        # narration rather than competing with it.
+        filter_parts.append(f"[{input_idx}:a]adelay={delay_ms}|{delay_ms},volume=0.45{label}")
+        mix_labels.append(label)
+
+    mix_inputs = "".join(mix_labels)
+    # normalize=0: amix normally divides overall volume by input count
+    # to avoid clipping, which would make the narration itself quieter
+    # every time a new sfx cue is added — normalize=0 keeps narration
+    # at its own original level, with sfx already pre-attenuated above.
+    filter_complex = (
+        ";".join(filter_parts)
+        + f";{mix_inputs}amix=inputs={len(mix_labels)}:duration=first:dropout_transition=0:normalize=0[aout]"
+    )
+
+    cmd = [
+        "ffmpeg", "-y", *inputs,
+        "-filter_complex", filter_complex,
+        "-map", "0:v", "-map", "[aout]",
+        "-c:v", "libx264", "-c:a", "aac", "-shortest", out_path,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+        print(f"[run_render] muxed with {len(valid_cues)} sound-effect cue(s)")
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.decode(errors="ignore")[-800:] if e.stderr else ""
+        print(f"[run_render] sound-effect mix failed, falling back to narration-only mux: {stderr}")
+        _mux_audio(video_path, narration_path, out_path)
 
 
 if __name__ == "__main__":
