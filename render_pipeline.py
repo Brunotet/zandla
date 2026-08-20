@@ -38,6 +38,16 @@ ICON_ENLARGE_SCALE = 1.25  # reduced further (was 1.45) — still too big per fe
 ICON_STROKE_TARGET_PX = 6.0  # numerator for scale-compensated stroke width (stroke_width =
                               # this / icon_path_info["scale"]) so the FINAL on-screen width
                               # lands near this many pixels regardless of the icon's fit-scale.
+ROW_CONTENT_H = 230  # compact, FIXED row height for multi-row icon_word "items" — NOT
+                      # stretched to fill the (intentionally oversized, for bleed-prevention)
+                      # allocated region. That stretch was the actual root cause of "rows too
+                      # far apart": each row became much taller than its content needed, with
+                      # icon+word centered in mostly-dead space.
+ROW_GAP_FIXED = 16   # small fixed gap between rows, not a percentage of region height.
+                      # BOTH of these must be module-level, not local to one function — they're
+                      # used by _layout_board() AND build_scene_program(), two separate
+                      # functions. Defining them as locals inside only one of those (which is
+                      # what broke the render) makes them invisible to the other.
                               # CONFIRMED BUG: this was 45.0 — a factor-of-10 mistake (meant to
                               # bump moderately from the original 5.0, wrote 45 instead of ~6).
                               # Verified in an actual browser render: 45px on a normal icon-sized
@@ -163,12 +173,6 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
     frame = get_frame_dims(orientation)
     target_aspect = frame["width"] / frame["height"]
     CONTENT_W, CONTENT_H = 420, 320  # unchanged content box size for a single-item slot
-    ROW_CONTENT_H = 230  # compact, FIXED row height for multi-row icon_word "items" — NOT
-                          # stretched to fill the (intentionally oversized, for bleed-
-                          # prevention) allocated region. That stretch was the actual root
-                          # cause of "rows too far apart": each row became much taller than
-                          # its content needed, with icon+word centered in mostly-dead space.
-    ROW_GAP_FIXED = 16    # small fixed gap between rows, not a percentage of region height
     MAX_ITEM_ROWS = 3  # icon_word "items" pairs: 2/4/6 entries -> 1/2/3 stacked rows
 
     def _row_count_for_beat(b: dict) -> int:
