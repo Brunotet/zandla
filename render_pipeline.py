@@ -23,6 +23,16 @@ from typing import List
 
 import voice_engine
 import asset_resolver
+import historical_asset_resolver
+
+# Channels whose beats should resolve through historical_asset_resolver
+# (Wikimedia Commons / LOC / NASA / Internet Archive, CLIP-matched
+# against a free-text concept_key) instead of asset_resolver's generic
+# icon+stock pipeline. Every existing channel is untouched — this set
+# is checked in ONE place (resolve_beat_asset, below) and everything
+# else about the pipeline (layout, camera, gestures, timing) is shared
+# as-is, unchanged, regardless of which channel is rendering.
+HISTORICAL_CHANNELS = {"history"}
 import gesture_engine
 import text_to_path
 import svg_to_path
@@ -130,12 +140,22 @@ def resolve_beat_asset(beat: dict, channel: str, illustration_cache_dir: str) ->
     if concept_key in channel_lib:
         return channel_lib[concept_key]
 
-    # No curated entry — live resolve, then persist.
-    resolved = asset_resolver.resolve(concept_key, cache_dir=illustration_cache_dir)
+    # No curated entry — live resolve, then persist. Historical channels
+    # route through the Commons/LOC/NASA/IA resolver instead of the
+    # generic icon+stock one — everything AFTER this point (caching,
+    # error handling, the entry dict written back to concept-library.json)
+    # is identical for both, so a historical resolution is cached and
+    # reused exactly like any other channel's.
+    if channel in HISTORICAL_CHANNELS:
+        resolved = historical_asset_resolver.resolve(concept_key, cache_dir=illustration_cache_dir)
+        source_desc = "Wikimedia Commons/LOC/NASA/Internet Archive"
+    else:
+        resolved = asset_resolver.resolve(concept_key, cache_dir=illustration_cache_dir)
+        source_desc = "icons or any stock source"
     if resolved is None:
         raise RuntimeError(
             f"No asset found for concept_key '{concept_key}' (beat_id={beat.get('beat_id')}) "
-            f"across icons or any stock source — cannot render this beat. Add a curated entry "
+            f"across {source_desc} — cannot render this beat. Add a curated entry "
             f"to channels/{channel}/concept-library.json or channels/_shared/concept-library.json "
             f"if this concept should always resolve to something specific."
         )
