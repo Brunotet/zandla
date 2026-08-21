@@ -1,0 +1,53 @@
+name: Test Historical Sources
+
+# Standalone smoke test — NOT the render pipeline. Triggered the same
+# way you already trigger render.yml from n8n (workflow_dispatch via
+# GitHub's API, same PAT), but this only calls
+# historical_asset_resolver.py directly against real Commons/LOC/NASA/
+# IA APIs and uploads whatever CLIP picked as a downloadable artifact.
+# No R2 upload, no n8n callback, no video render — nothing here
+# touches render.yml or any other channel's flow at all.
+
+on:
+  workflow_dispatch:
+    inputs:
+      queries:
+        description: >
+          Pipe-separated list of test phrases, e.g.
+          "Amelia Earhart portrait 1928|Nikola Tesla laboratory|Apollo 11 moon landing".
+          Leave blank to use the script's built-in default 4 phrases.
+        required: false
+        type: string
+
+jobs:
+  test-sources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt --break-system-packages
+
+      - name: Run historical source test
+        run: |
+          if [ -n "${{ inputs.queries }}" ]; then
+            IFS='|' read -ra PHRASES <<< "${{ inputs.queries }}"
+            ARGS=()
+            for p in "${PHRASES[@]}"; do ARGS+=(--query "$p"); done
+            python3 tools/test_historical_sources.py "${ARGS[@]}"
+          else
+            python3 tools/test_historical_sources.py
+          fi
+
+      - name: Upload picked images as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: historical-test-results
+          path: /tmp/historical_test/
+          retention-days: 7
