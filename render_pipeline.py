@@ -428,7 +428,15 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 sweep["start"] = move_arrival - sweep_duration
                 sweep["duration"] = sweep_duration
                 beat_out_ref["camera_transition"] = sweep
-                sound_cues.append({"file": "woosh.mp3", "start": sweep["start"]})
+                # SOUND FIXED: was using the sweep HAND's own start (which
+                # is deliberately lengthened for visual readability, so it
+                # can start earlier or run longer than the camera itself
+                # actually moves) — the woosh SOUND now uses the camera's
+                # own real start time and real movement duration, so it
+                # starts exactly when the camera starts and stops exactly
+                # when the camera stops, independent of the hand's own
+                # separate visual timing.
+                sound_cues.append({"file": "woosh.mp3", "start": camera_free_at, "duration": duration})
 
         camera_free_at = beat_ref["end"]
         last_camera_center = target_center
@@ -497,7 +505,6 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             font_size = text_to_path.fit_font_size_wrapped(beat["text"], usable_w, usable_h)
             text_x = region["x"] + region["w"] * pad
             text_y = region["y"] + region["h"] * pad
-            sound_cues.append({"file": "wrighting.mp3", "start": beat["start"]})
             stroke_info = text_to_path.text_to_strokes_wrapped(
                 beat["text"], x=text_x, y=text_y, font_size=font_size, max_width=usable_w
             )
@@ -545,6 +552,11 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             beat_duration = max(0.01, beat["end"] - beat["start"])
             compressed_duration = max(0.5, beat_duration - BUFFER_SECONDS)
             time_compression = compressed_duration / beat_duration
+            # SOUND FIXED: now uses the ACTUAL compressed writing duration
+            # (how long the hand really takes to finish), not the full
+            # beat span — previously the sound file just played through
+            # regardless of when writing actually stopped.
+            sound_cues.append({"file": "wrighting.mp3", "start": beat["start"], "duration": compressed_duration})
 
             if len(beat_words) == len(word_groups) and len(beat_words) > 0:
                 segment_durations = [None] * len(stroke_info["subpaths"])
@@ -658,8 +670,8 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 icon_end_t = icon_start_t + icon_duration
                 word_start_t = icon_end_t
                 word_end_t = word_start_t + word_duration
-                sound_cues.append({"file": "drawing.mp3", "start": icon_start_t})
-                sound_cues.append({"file": "wrighting.mp3", "start": word_start_t})
+                sound_cues.append({"file": "drawing.mp3", "start": icon_start_t, "duration": icon_duration})
+                sound_cues.append({"file": "wrighting.mp3", "start": word_start_t, "duration": word_duration})
 
                 concept_key = (icon_item.get("concept_key") or "").strip()
                 if not concept_key:
@@ -792,8 +804,8 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             icon_end_t = icon_start_t + icon_duration
             label_start_t = icon_end_t
             label_end_t = label_start_t + label_duration
-            sound_cues.append({"file": "drawing.mp3", "start": icon_start_t})
-            sound_cues.append({"file": "wrighting.mp3", "start": label_start_t})
+            sound_cues.append({"file": "drawing.mp3", "start": icon_start_t, "duration": icon_duration})
+            sound_cues.append({"file": "wrighting.mp3", "start": label_start_t, "duration": label_duration})
 
             sub_visuals = []
 
@@ -905,7 +917,6 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             asset_entry = resolve_beat_asset(beat, channel, illustration_cache_dir)
             beat_out["asset"] = asset_entry
             beat_out["region"] = region
-            sound_cues.append({"file": "drawing.mp3", "start": beat["start"]})
             print(f"[render_pipeline] beat_id={beat['beat_id']} concept_key={beat.get('concept_key')!r} "
                   f"-> resolved: source={asset_entry.get('asset_source')} "
                   f"ref={asset_entry.get('asset_ref')} draw_style={asset_entry.get('draw_style')}")
@@ -942,6 +953,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 # thin jump right after the reveal finishes.
                 beat_out["stroke_width_final"] = _icon_stroke_w * icon_path_info["scale"]
                 beat_out["min_reveal_duration"] = 1.3
+                sound_cues.append({"file": "drawing.mp3", "start": beat["start"], "duration": 1.3})
                 beat_out["path_transform"] = icon_path_info["transform"]
                 beat_out["path_offset_x"] = icon_path_info["offset_x"]
                 beat_out["path_offset_y"] = icon_path_info["offset_y"]
@@ -952,13 +964,20 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 # code (the hand assignment below only fires when "subpaths" is present) —
                 # which is exactly the hand-less icon in the screenshot. Now gets a 'drag'
                 # gesture that tracks the reveal edge.
+                # SECOND BUG FOUND AND FIXED HERE: this was the one mask_wipe case that
+                # never got the fast-reveal timing fix (icon_word's mask_wipe got it
+                # earlier, this plain "draw" one was missed) — it was spanning the ENTIRE
+                # beat instead of a fast, fixed duration, matching the stroke_reveal
+                # sibling case right above.
+                _draw_reveal_duration = min(1.3, max(0.01, beat["end"] - beat["start"]))
                 beat_out["illustration_path"] = asset_entry["asset_ref"].get("cached_path")
                 beat_out["illustration_region"] = region
                 beat_out["illustration_start"] = beat["start"]
-                beat_out["illustration_end"] = beat["end"]
+                beat_out["illustration_end"] = beat["start"] + _draw_reveal_duration
                 beat_out["mask_wipe_hand"] = gesture_engine.scaled_hand(
                     "drag", target_height=region["h"] * 0.5
                 ).to_dict()
+                sound_cues.append({"file": "drawing.mp3", "start": beat["start"], "duration": _draw_reveal_duration})
 
             if "subpaths" in beat_out or "path_d" in beat_out:
                 # target_height proportional to region size for icons — a hand
@@ -1099,7 +1118,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             sweep["start"] = camera_free_at
             sweep["duration"] = max(0.4, beat["end"] - beat["start"])
             beat_out["hand_sweep"] = sweep
-            sound_cues.append({"file": "woosh.mp3", "start": sweep["start"]})
+            sound_cues.append({"file": "woosh.mp3", "start": sweep["start"], "duration": sweep["duration"]})
             _apply_camera_move(beat_out, beat, None, "zoom_out", skip_transition=True)
 
         elif beat["mode"] == "talk":
