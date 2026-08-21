@@ -133,7 +133,14 @@ def _mux_audio_with_sfx(video_path: str, narration_path: str, sound_cues: list, 
     for cue in sound_cues:
         sfx_path = os.path.join(SOUNDEFFECT_DIR, cue["file"])
         if os.path.isfile(sfx_path):
-            valid_cues.append({"path": sfx_path, "start": max(0.0, cue["start"])})
+            valid_cues.append({
+                "path": sfx_path, "start": max(0.0, cue["start"]),
+                # Real duration of the visual action this sound accompanies —
+                # if present, the clip gets TRIMMED to it so the sound stops
+                # exactly when the drawing/writing/camera-move stops, instead
+                # of playing the whole file through regardless.
+                "duration": cue.get("duration"),
+            })
         else:
             print(f"[run_render] sound cue file not found, skipping: {sfx_path}")
 
@@ -150,9 +157,13 @@ def _mux_audio_with_sfx(video_path: str, narration_path: str, sound_cues: list, 
         input_idx = i + 2  # 0=video, 1=narration, 2.. = sfx clips in order
         delay_ms = int(cue["start"] * 1000)
         label = f"[sfx{i}]"
-        # Delayed to its cue time, volume reduced so it sits UNDER the
-        # narration rather than competing with it.
-        filter_parts.append(f"[{input_idx}:a]adelay={delay_ms}|{delay_ms},volume=0.45{label}")
+        # BUG FIXED: sfx clips used to play in full regardless of how
+        # long the visual action actually took — trimmed to the real
+        # duration now (atrim, applied on the clip's own 0-based
+        # timeline BEFORE the delay shifts it to its actual cue time).
+        # Volume bumped up (0.45 -> 0.65) per direct feedback.
+        trim = f"atrim=0:{cue['duration']:.3f}," if cue.get("duration") else ""
+        filter_parts.append(f"[{input_idx}:a]{trim}adelay={delay_ms}|{delay_ms},volume=0.65{label}")
         mix_labels.append(label)
 
     mix_inputs = "".join(mix_labels)
