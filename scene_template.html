@@ -310,6 +310,38 @@
     const start = cfg.illustration_start !== undefined ? cfg.illustration_start : cfg.start;
     const end = cfg.illustration_end !== undefined ? cfg.illustration_end : cfg.end;
     const duration = Math.max(0.05, end - start);
+
+    // POP-IN reveal — used for real historical photos (asset_type
+    // "photo" on the history channel — see render_pipeline.py's
+    // _illustration_reveal). No hand at all: a hand pretending to
+    // "draw" a real photograph into existence reads as an obvious
+    // fake, since nothing is actually being drawn. Just a quick
+    // fade+scale so the photo arrives cleanly instead.
+    if (cfg.illustration_reveal === 'pop' || !cfg.mask_wipe_hand) {
+      const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+      img.setAttribute('x', region.x);
+      img.setAttribute('y', region.y);
+      img.setAttribute('width', region.w);
+      img.setAttribute('height', region.h);
+      img.setAttribute('href', cfg.illustration_path);
+      img.style.opacity = '0';
+      const cx = region.x + region.w / 2, cy = region.y + region.h / 2;
+      const scaleState = { s: 0.9 };
+      img.setAttribute('transform', `translate(${cx},${cy}) scale(${scaleState.s}) translate(${-cx},${-cy})`);
+      contentLayer.appendChild(img);
+
+      const popDuration = Math.min(0.5, Math.max(0.25, duration));
+      const tl = gsap.timeline({ delay: start });
+      tl.to(img.style, { opacity: 1, duration: popDuration, ease: 'power2.out' }, 0);
+      tl.to(scaleState, {
+        s: 1.0, duration: popDuration, ease: 'back.out(1.6)',
+        onUpdate: () => {
+          img.setAttribute('transform', `translate(${cx},${cy}) scale(${scaleState.s}) translate(${-cx},${-cy})`);
+        },
+      }, 0);
+      return;
+    }
+
     const clipId = `clip-${cfg.beat_id}`;
     const clip = document.createElementNS('http://www.w3.org/2000/svg', 'clipPath');
     clip.setAttribute('id', clipId);
