@@ -29,6 +29,10 @@ on:
         description: "The public pub-*.r2.dev URL matching presigned_put_url, just echoed into the log for convenience."
         required: false
         type: string
+      callback_url:
+        description: "n8n's Wait-node webhook URL — POSTed to when the test finishes, same {status, render_id, video_url, channel} shape resume_n8n.py already uses for real renders."
+        required: false
+        type: string
 
 jobs:
   test-sources:
@@ -79,6 +83,14 @@ jobs:
         run: |
           curl -sS -X PUT --upload-file /tmp/historical_test_preview.mp4 "${{ inputs.presigned_put_url }}"
           echo "Uploaded — view at: ${{ inputs.public_url }}"
+
+      - name: Callback to n8n Wait node
+        if: ${{ inputs.callback_url != '' }}
+        run: |
+          curl -sS -X POST "${{ inputs.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"status": "ok", "render_id": "historical-test-${{ github.run_id }}", "video_url": "${{ inputs.public_url }}", "channel": "history"}'
+          echo "n8n callback delivered"
 
       - name: Upload picked images + video as artifact (always, as backup)
         uses: actions/upload-artifact@v4
