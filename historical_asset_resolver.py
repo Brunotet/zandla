@@ -97,7 +97,7 @@ def _download_image(url: str) -> Optional[bytes]:
 # ══════════════════════════════════════════════════════════════════
 # Wikimedia Commons
 # ══════════════════════════════════════════════════════════════════
-def _fetch_wikimedia_commons(query: str) -> list:
+def _fetch_wikimedia_commons(query: str, download: bool = True) -> list:
     """MediaWiki API, generator=search restricted to the File namespace
     (ns=6), with imageinfo (URL + extmetadata for the license check).
     Free-text search, not a category lookup — a category lookup would
@@ -105,7 +105,15 @@ def _fetch_wikimedia_commons(query: str) -> list:
     category name, which fails silently for a lot of subjects (no
     category, or a differently-worded one). Free-text search is the
     more robust default; a category-based tier can be layered in later
-    for subjects it's confirmed to help."""
+    for subjects it's confirmed to help.
+
+    download=False skips the actual image fetch and returns candidates
+    with image_bytes=None — used by has_image_coverage() below, which
+    only needs to know "does anything license-clean exist for this
+    query", not the pixels themselves. This is what keeps the scout's
+    per-candidate coverage check cheap enough to try several
+    candidates in a loop without downloading a pile of images for
+    subjects that get rejected anyway."""
     data = _get_json("https://commons.wikimedia.org/w/api.php", {
         "action": "query", "format": "json",
         "generator": "search", "gsrsearch": query, "gsrnamespace": 6,
@@ -135,6 +143,14 @@ def _fetch_wikimedia_commons(query: str) -> list:
         img_url = info.get("thumburl") or info.get("url")
         if not img_url:
             continue
+
+        if not download:
+            candidates.append(HistoricalAsset(
+                source="wikimedia_commons", image_bytes=None,
+                credit_url=info.get("descriptionurl", img_url),
+            ))
+            continue
+
         img_bytes = _download_image(img_url)
         if img_bytes:
             candidates.append(HistoricalAsset(
@@ -142,6 +158,15 @@ def _fetch_wikimedia_commons(query: str) -> list:
                 credit_url=info.get("descriptionurl", img_url),
             ))
     return candidates
+
+
+def has_image_coverage(query: str) -> bool:
+    """Cheap yes/no check — metadata only, zero image downloads, zero
+    CLIP. For the scout to use when evaluating several candidate
+    subjects: reject a candidate with no usable Commons coverage
+    BEFORE committing a full script/render pipeline run to it, without
+    paying the cost of a full resolve() for every candidate tried."""
+    return len(_fetch_wikimedia_commons(query, download=False)) > 0
 
 
 # ══════════════════════════════════════════════════════════════════
