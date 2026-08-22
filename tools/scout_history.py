@@ -233,6 +233,8 @@ def scout(already_used: list) -> dict:
 
 
 if __name__ == "__main__":
+    import traceback
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--already-used", default="",
                          help="Pipe-separated list of subjects already covered, e.g. "
@@ -242,11 +244,30 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     already_used = [s for s in args.already_used.split("|") if s.strip()] if args.already_used else []
-    result = scout(already_used)
+
+    # CRASH-SAFE: always write SOMETHING to --output, even on an
+    # unhandled exception — without this, a real bug (not just "no
+    # candidates found today", which is an expected, valid outcome)
+    # silently leaves no file behind, and the n8n callback step fails
+    # with a confusing FileNotFoundError that tells you nothing about
+    # what actually went wrong. Now the crash reason itself gets
+    # written to the file and POSTed back to n8n, so you see the real
+    # error immediately instead of having to dig through Actions logs.
+    try:
+        result = scout(already_used)
+        exit_code = 0 if result.get("found") else 1
+    except Exception as e:
+        traceback.print_exc()  # still visible in the Actions log, not hidden
+        result = {
+            "found": False,
+            "reason": f"scout CRASHED: {type(e).__name__}: {e}",
+            "traceback": traceback.format_exc(),
+        }
+        exit_code = 1
 
     print(json.dumps(result, indent=2))
     if args.output:
         with open(args.output, "w") as f:
             json.dump(result, f, indent=2)
 
-    sys.exit(0 if result.get("found") else 1)
+    sys.exit(exit_code)
