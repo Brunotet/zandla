@@ -43,7 +43,9 @@ jobs:
           cache: "pip"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt --break-system-packages
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y ffmpeg
+          pip install -r requirements.txt --break-system-packages
 
       - name: Run historical source test
         run: |
@@ -56,19 +58,33 @@ jobs:
             python3 tools/test_historical_sources.py
           fi
 
-      - name: Zip results
+      - name: Build slideshow preview video
         run: |
-          cd /tmp/historical_test && zip -r /tmp/historical_test_results.zip . && cd -
+          # Each picked image on screen for 2.5s, in one clickable mp4
+          # instead of a zip you have to download+extract. Pad/scale
+          # everything to the same frame so mismatched source image
+          # sizes (Commons vs LOC vs NASA vs IA) don't break concat.
+          # File order = alphabetical by cached filename, which is
+          # NOT necessarily the order the phrases were tested in — the
+          # Actions log from "Run historical source test" above is the
+          # source of truth for which file matches which phrase/source.
+          cd /tmp/historical_test
+          ffmpeg -y -framerate 1/2.5 -pattern_type glob -i '*.jpg' \
+            -vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,format=yuv420p" \
+            -c:v libx264 -r 30 -pix_fmt yuv420p /tmp/historical_test_preview.mp4
+          cd -
 
-      - name: Upload zip to R2 (presigned PUT)
+      - name: Upload preview video to R2 (presigned PUT)
         if: ${{ inputs.presigned_put_url != '' }}
         run: |
-          curl -sS -X PUT --upload-file /tmp/historical_test_results.zip "${{ inputs.presigned_put_url }}"
+          curl -sS -X PUT --upload-file /tmp/historical_test_preview.mp4 "${{ inputs.presigned_put_url }}"
           echo "Uploaded — view at: ${{ inputs.public_url }}"
 
-      - name: Upload picked images as artifact (always, as backup)
+      - name: Upload picked images + video as artifact (always, as backup)
         uses: actions/upload-artifact@v4
         with:
           name: historical-test-results
-          path: /tmp/historical_test/
+          path: |
+            /tmp/historical_test/
+            /tmp/historical_test_preview.mp4
           retention-days: 7
