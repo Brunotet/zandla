@@ -24,12 +24,14 @@ explicitly fine, doesn't need to be a famous person or event):
 """
 import argparse
 import json
+import os
 import random
 import re
 import sys
 
 import requests
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import historical_asset_resolver as har
 
 REQUEST_TIMEOUT = 12
