@@ -18,14 +18,16 @@ import json
 import os
 from typing import Optional
 
-VALID_MODES = {"write", "draw", "icon_word", "point", "zoom_in", "zoom_out", "drag", "erase", "swipe", "talk"}
+# "point" REMOVED per direct feedback (the pointing-finger gesture is no
+# longer wanted). zoom_in/zoom_out are kept as pure camera moves — see
+# render_pipeline.py — so they no longer resolve to a hand gesture either.
+VALID_MODES = {"write", "draw", "icon_word", "zoom_in", "zoom_out", "drag", "erase", "swipe", "talk"}
 GESTURE_FOR_MODE = {
     "write": "write",
     "draw": "write",       # draw mode still uses the write/pen gesture, just targets an icon instead of text
     "icon_word": "write",  # icon + short label, same pen gesture as draw/write
-    "point": "point",
-    "zoom_in": "pinch_in",   # resolves to the pinch_in -> pinch_out swap pair
-    "zoom_out": "pinch_out",  # resolves to the pinch_out -> pinch_in swap pair
+    "zoom_in": None,        # pure camera move now — no hand gesture (icon-enlarge pinch removed)
+    "zoom_out": None,       # pure camera move now — no hand gesture (icon-enlarge pinch removed)
     "drag": "drag",
     "erase": "erase",
     "swipe": "swipe",
@@ -51,7 +53,7 @@ def validate_beat(beat: dict, index: int) -> None:
 
     has_items = beat["mode"] == "icon_word" and bool(beat.get("items"))
 
-    if beat["mode"] in ("draw", "point", "zoom_in", "zoom_out", "drag") and "concept_key" not in beat:
+    if beat["mode"] in ("draw", "zoom_in", "zoom_out", "drag") and "concept_key" not in beat:
         raise BeatValidationError(
             f"beat[{index}] (id={beat['beat_id']}) mode='{beat['mode']}' requires a concept_key"
         )
@@ -66,6 +68,17 @@ def validate_beat(beat: dict, index: int) -> None:
             raise BeatValidationError(
                 f"beat[{index}] (id={beat['beat_id']}) mode='icon_word' requires a non-empty 'label' "
                 f"(the short word/phrase written beside the icon, e.g. concept_key='food', label='good')"
+            )
+        # NEW, optional: "layout" picks how the icon and word share the
+        # slot — "side_by_side" (default, icon left / word right) or
+        # "stacked" (icon centered, word centered directly below it).
+        # Omit entirely for the default; only checked when present so
+        # every existing beat (which never sets this) is unaffected.
+        layout = beat.get("layout")
+        if layout is not None and layout not in ("side_by_side", "stacked"):
+            raise BeatValidationError(
+                f"beat[{index}] (id={beat['beat_id']}) mode='icon_word' has invalid 'layout' "
+                f"{layout!r} — must be 'side_by_side' or 'stacked' (omit entirely for the default side_by_side)"
             )
 
     if has_items:

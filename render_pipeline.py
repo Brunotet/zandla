@@ -44,7 +44,11 @@ REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 # How much bigger a pinched-in icon gets, relative to its original
 # drawn size. Tune this single number if "enlarge" should read as
 # more/less dramatic — nothing else needs to change.
-ICON_ENLARGE_SCALE = 1.25  # reduced further (was 1.45) — still too big per feedback
+ICON_ENLARGE_SCALE = 1.25  # NO LONGER USED — the zoom_in/zoom_out icon-enlarge effect
+                           # (and its pinch hand) was removed per direct feedback. Left
+                           # here rather than deleted so nothing else that might still
+                           # reference this constant breaks; safe to remove for real once
+                           # confirmed nothing imports it.
 ICON_STROKE_TARGET_PX = 6.0  # numerator for scale-compensated stroke width (stroke_width =
                               # this / icon_path_info["scale"]) so the FINAL on-screen width
                               # lands near this many pixels regardless of the icon's fit-scale.
@@ -496,7 +500,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             for item in beat["items"]:
                 if item.get("type") == "icon" and item.get("concept_key"):
                     concept_regions[item["concept_key"]] = region
-        if region is None and beat["mode"] in ("point", "zoom_in", "zoom_out"):
+        if region is None and beat["mode"] in ("zoom_in", "zoom_out"):
             ck = beat.get("concept_key")
             region = concept_regions.get(ck)
             if region is None:
@@ -788,17 +792,48 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             _apply_camera_move(beat_out, beat, region, "zoom_in")
 
         elif beat["mode"] == "icon_word" and region:
-            # Left ~46% of this beat's region for the icon, right side
-            # for the short written label — NOT the full sentence, just
-            # the label field (e.g. concept_key="food", label="good").
-            # Increased from 0.42/0.06 — icon/image was reading small.
-            gutter = region["w"] * 0.05
-            icon_w = region["w"] * 0.46
-            icon_region = {"x": region["x"], "y": region["y"], "w": icon_w, "h": region["h"]}
-            text_region = {
-                "x": region["x"] + icon_w + gutter, "y": region["y"],
-                "w": region["w"] - icon_w - gutter, "h": region["h"],
-            }
+            # NEW: "layout" picks how the icon and its word share this
+            # beat's region. Optional, defaults to the original
+            # side-by-side split so every existing script (which never
+            # sets this field) renders EXACTLY as before, unchanged.
+            #   "side_by_side" (default): icon on the left, word on the right.
+            #   "stacked": icon centered on top, word centered directly below it.
+            icon_layout = (beat.get("layout") or "side_by_side").strip().lower()
+
+            if icon_layout == "stacked":
+                # Icon takes the top ~62% of the region, word the
+                # remainder below it, both horizontally centered. A
+                # fixed fraction of region height (not a fixed pixel
+                # count) so this scales correctly whether the region
+                # is a normal single slot or a bigger grouped one.
+                icon_h = region["h"] * 0.62
+                stack_gap = region["h"] * 0.06
+                text_h = region["h"] - icon_h - stack_gap
+                icon_w = region["w"] * 0.8  # inset from the sides so a big icon never touches the slot edge
+                icon_region = {
+                    "x": region["x"] + (region["w"] - icon_w) / 2,
+                    "y": region["y"],
+                    "w": icon_w,
+                    "h": icon_h,
+                }
+                text_region = {
+                    "x": region["x"],
+                    "y": region["y"] + icon_h + stack_gap,
+                    "w": region["w"],
+                    "h": text_h,
+                }
+            else:
+                # Left ~46% of this beat's region for the icon, right side
+                # for the short written label — NOT the full sentence, just
+                # the label field (e.g. concept_key="food", label="good").
+                # Increased from 0.42/0.06 — icon/image was reading small.
+                gutter = region["w"] * 0.05
+                icon_w = region["w"] * 0.46
+                icon_region = {"x": region["x"], "y": region["y"], "w": icon_w, "h": region["h"]}
+                text_region = {
+                    "x": region["x"] + icon_w + gutter, "y": region["y"],
+                    "w": region["w"] - icon_w - gutter, "h": region["h"],
+                }
             label = beat.get("label") or beat["text"]
 
             asset_entry = resolve_beat_asset(beat, channel, illustration_cache_dir)
@@ -881,11 +916,21 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 _img_scale = 1.3
                 _cx = icon_region["x"] + icon_region["w"] / 2
                 _cy = icon_region["y"] + icon_region["h"] / 2
+                _grown_w = icon_region["w"] * _img_scale
+                _grown_h = icon_region["h"] * _img_scale
+                if icon_layout == "stacked":
+                    # A big image growing symmetrically around its center
+                    # would eat into the word row directly below it — so
+                    # for the stacked layout, height growth is clamped to
+                    # the icon's own allotted box; only width is allowed
+                    # to grow (and only up to the region's own width).
+                    _grown_h = icon_region["h"]
+                    _grown_w = min(_grown_w, region["w"])
                 image_region = {
-                    "x": _cx - (icon_region["w"] * _img_scale) / 2,
-                    "y": _cy - (icon_region["h"] * _img_scale) / 2,
-                    "w": icon_region["w"] * _img_scale,
-                    "h": icon_region["h"] * _img_scale,
+                    "x": _cx - _grown_w / 2,
+                    "y": _cy - _grown_h / 2,
+                    "w": _grown_w,
+                    "h": _grown_h,
                 }
                 beat_out["illustration_path"] = asset_entry["asset_ref"].get("cached_path")
                 beat_out["illustration_region"] = image_region
@@ -1011,122 +1056,22 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
 
             _apply_camera_move(beat_out, beat, region, "zoom_in")
 
-        elif beat["mode"] == "point" and region:
-            target_x = region["x"] + region["w"] / 2
-            target_y = region["y"] + region["h"] / 2
-            hand = gesture_engine.scaled_hand("point", target_height=region["h"] * 0.45)
-            beat_out["hand"] = hand.placement_at(target_x, target_y)
-            beat_out["region"] = region
-
         elif beat["mode"] in ("zoom_in", "zoom_out") and region:
-            direction = "in" if beat["mode"] == "zoom_in" else "out"
-            target_x = region["x"] + region["w"] / 2
-            th = region["h"] * 0.5
-            # FIXED per feedback: was too far below the icon (0.55x)
-            # — now much closer, so the pinching fingers land right at
-            # the icon's own bottom edge instead of clearly underneath it.
-            # NOTE: can't make this fully precise without hand-gestures.json
-            # (need the pinch gesture's actual anchor_frac to know which
-            # pixel of the hand image "target_y" actually lands at — see
-            # placement_at() in gesture_engine.py). Best-effort in the
-            # meantime: target lands exactly AT the icon's bottom edge,
-            # not below it.
-            target_y = region["y"] + region["h"]
-            start_hand, end_hand = gesture_engine.zoom_swap_pair(direction=direction, target_height=th)
-            swap_at = (beat["start"] + beat["end"]) / 2
-            beat_out["hand_swap"] = {
-                "start": start_hand.placement_at(target_x, target_y),
-                "end": end_hand.placement_at(target_x, target_y),
-                "swap_at": swap_at,
-            }
+            # SIMPLIFIED PER DIRECT FEEDBACK: "point" mode and the
+            # zoom_in/zoom_out pinch-hand + in-place icon enlarge/
+            # shrink effect (hand_swap / icon_scale / erase_relabel)
+            # are both removed — neither is wanted anymore. zoom_in/
+            # zoom_out are now a PURE camera move: the camera reframes
+            # tighter on (or pulls back from) an already-drawn concept,
+            # with no hand appearing on screen and no change to the
+            # icon's own size. Nothing else about this beat type
+            # changes — it still requires a concept_key that references
+            # something drawn earlier (enforced above), it still drives
+            # the camera timeline via _apply_camera_move below, and a
+            # camera-transition swipe hand can still fire if the camera
+            # move is a big enough jump (that's a property of the
+            # camera move itself, not of this mode).
             beat_out["region"] = region
-
-            # Enlarge/shrink the ICON ITSELF in place (separate from
-            # the camera move below) — targets the icon_group_id set
-            # when that concept_key was originally drawn. zoom_in grows
-            # it to ICON_ENLARGE_SCALE; zoom_out shrinks it back to 1x.
-            # If nothing with that concept_key was ever drawn as an
-            # icon (e.g. it was a mask_wipe illustration, which has no
-            # group id), this is silently skipped in the template —
-            # the pinch hand still plays, just without an icon to grow.
-            ck = beat.get("concept_key")
-            if ck:
-                icon_center_y = region["y"] + region["h"] / 2
-                # Look up the CURRENT group id for this concept_key —
-                # group ids are unique per beat now (see the
-                # concept_group_ids comment above), so this can't just
-                # be recomputed from concept_key anymore.
-                target_group_id = concept_group_ids.get(ck)
-                if target_group_id:
-                    beat_out["icon_scale"] = {
-                        "target_id": target_group_id,
-                        "cx": target_x,
-                        "cy": icon_center_y,
-                        "scale": ICON_ENLARGE_SCALE if beat["mode"] == "zoom_in" else 1.0,
-                        "swap_at": swap_at,
-                        "duration": max(0.2, (beat["end"] - beat["start"]) / 2),
-                    }
-
-                # NEW, OPT-IN FEATURE: if this beat provides "new_label"
-                # AND the concept being zoomed into had a word written
-                # next to it (from an icon_word beat), erase that old
-                # word and write a fresh one specific to THIS sentence.
-                # Only activates when BOTH conditions hold — any beat
-                # that doesn't set "new_label" is completely unaffected,
-                # identical to before this feature existed.
-                new_label = (beat.get("new_label") or "").strip()
-                old_label_group_id = concept_label_group_ids.get(ck)
-                original_region = concept_regions.get(ck)
-                if new_label and old_label_group_id and original_region:
-                    # Recompute the SAME icon/label split math the
-                    # original icon_word beat used, so the new word
-                    # lands exactly where the old one was.
-                    _icon_w = original_region["w"] * 0.42
-                    _gutter = original_region["w"] * 0.06
-                    old_label_region = {
-                        "x": original_region["x"] + _icon_w + _gutter,
-                        "y": original_region["y"],
-                        "w": original_region["w"] - _icon_w - _gutter,
-                        "h": original_region["h"],
-                    }
-                    erase_hand_data = gesture_engine.scaled_erase_zone(
-                        target_height=old_label_region["h"] * 0.6
-                    )
-                    erase_target_x = old_label_region["x"] + old_label_region["w"] / 2
-                    erase_target_y = old_label_region["y"] + old_label_region["h"] / 2
-                    erase_start = swap_at  # right as the pinch settles into its enlarged state
-                    erase_duration = 0.5
-
-                    pad = 0.15
-                    usable_w = old_label_region["w"] * (1 - 2 * pad)
-                    usable_h = old_label_region["h"] * (1 - 2 * pad)
-                    font_size = text_to_path.fit_font_size(new_label, usable_w, usable_h)
-                    text_x = old_label_region["x"] + old_label_region["w"] * pad
-                    text_y = old_label_region["y"] + (old_label_region["h"] - font_size) / 2
-                    stroke_info = text_to_path.text_to_strokes(new_label, x=text_x, y=text_y, font_size=font_size)
-
-                    beat_out["erase_relabel"] = {
-                        "erase_hand": {
-                            "file": erase_hand_data["file"],
-                            "w": erase_hand_data["w"], "h": erase_hand_data["h"],
-                            "x": erase_target_x - erase_hand_data["zone_cx"],
-                            "y": erase_target_y - erase_hand_data["zone_cy"],
-                        },
-                        "erase_start": erase_start,
-                        "erase_duration": erase_duration,
-                        "old_label_group_id": old_label_group_id,
-                        "new_label_hand": gesture_engine.scaled_hand(
-                            "write", target_height=old_label_region["h"] * 0.55
-                        ).to_dict(),
-                        "new_label_subvisual": {
-                            "beat_id": f"{beat['beat_id']}-relabel",
-                            "subpaths": stroke_info["subpaths"],
-                            "stroke_width": max(1.5, font_size * 0.045),
-                            "path_transform": None,
-                            "start": erase_start + erase_duration,
-                            "end": erase_start + erase_duration + max(0.6, len(new_label) * 0.08),
-                        },
-                    }
             _apply_camera_move(beat_out, beat, region, beat["mode"])
 
         elif beat["mode"] == "swipe":
