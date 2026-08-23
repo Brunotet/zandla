@@ -64,26 +64,117 @@
   const transitionLayer = document.getElementById('transition-layer');
 
   // ── Camera: drives the SVG viewBox directly, see camera.py for why ──
+  //
+  // NEW: pen-tip tracking layer, added on top of the existing
+  // keyframe camera below — nothing about the keyframe system itself
+  // changes. Previously the keyframe tween wrote straight to the
+  // viewBox attribute every frame. Now it writes into `baseCam`
+  // instead, and a second per-frame pass (applyCameraFrame) blends
+  // baseCam with a tighter, pen-following view whenever a stroke is
+  // actively being drawn — then eases back to exactly baseCam the
+  // instant drawing stops. If nothing is ever tracked (tracking
+  // never engages), applyCameraFrame reduces to "just show baseCam",
+  // which is byte-for-byte the old behavior.
+  //
+  // This only activates for stroke-reveals (icon paths, handwritten
+  // words) — see traceHandCallback below — never for mask_wipe image
+  // reveals, since there's no pen tip to follow there.
+  const TRACK_ZOOM = 0.72;            // fraction of the base view's current size to zoom to while
+                                       // tracking (0.72 ≈ a mild, noticeable-but-not-aggressive zoom).
+                                       // 1.0 would mean no zoom at all; smaller = tighter. This is
+                                       // the one number to change if the zoom ever feels too shallow
+                                       // or too tight — everything else scales off it automatically.
+  const TRACK_FOLLOW_SMOOTH = 0.20;   // 0-1: how fast the tracked center catches up to the REAL,
+                                       // live pen-tip position each frame. Lower = smoother/laggier
+                                       // (better for fast, jittery pen motion); higher = snappier but
+                                       // more prone to reading as shaky.
+  const TRACK_ENGAGE_SMOOTH = 0.14;   // 0-1: how fast the ZOOM AMOUNT itself eases in when a stroke
+                                       // starts and back out when it ends — this is what makes the
+                                       // zoom-in/zoom-out feel like a deliberate camera move instead
+                                       // of an instant cut.
+
+  const baseCam = { x: 0, y: 0, w: 1920, h: 1080 }; // driven by the keyframe timeline below, unchanged in spirit
+  const track = {
+    active: false,    // true for every frame a stroke is actively being traced
+    engage: 0,        // 0 = fully on baseCam, 1 = fully on the tight tracked view — eased, not stepped
+    x: 0, y: 0,        // smoothed tracked center, world-space
+    hasTarget: false, // false right after a release, so the FIRST point of a new stroke snaps
+                       // straight there instead of smooth-following in from wherever the last
+                       // stroke ended (which could be a completely different part of the board).
+  };
+
+  function setPenTrackTarget(x, y) {
+    track.active = true;
+    if (!track.hasTarget) {
+      track.x = x;
+      track.y = y;
+      track.hasTarget = true;
+    } else {
+      track.x += (x - track.x) * TRACK_FOLLOW_SMOOTH;
+      track.y += (y - track.y) * TRACK_FOLLOW_SMOOTH;
+    }
+  }
+
+  function releasePenTrackTarget() {
+    track.active = false;
+    track.hasTarget = false;
+  }
+
+  function applyCameraFrame() {
+    const goal = track.active ? 1 : 0;
+    track.engage += (goal - track.engage) * TRACK_ENGAGE_SMOOTH;
+    if (Math.abs(track.engage - goal) < 0.001) track.engage = goal;
+
+    let view = baseCam;
+    if (track.engage > 0.001) {
+      const tw = baseCam.w * TRACK_ZOOM;
+      const th = baseCam.h * TRACK_ZOOM;
+      const tx = track.x - tw / 2;
+      const ty = track.y - th / 2;
+      // Blend baseCam -> tracked rect by `engage`, not a hard swap —
+      // this is what makes both the zoom-in AND the pen-following
+      // itself read as one continuous, smooth camera move rather than
+      // snapping to a new rectangle every frame.
+      view = {
+        x: baseCam.x + (tx - baseCam.x) * track.engage,
+        y: baseCam.y + (ty - baseCam.y) * track.engage,
+        w: baseCam.w + (tw - baseCam.w) * track.engage,
+        h: baseCam.h + (th - baseCam.h) * track.engage,
+      };
+    }
+    worldEl.setAttribute('viewBox', `${view.x} ${view.y} ${view.w} ${view.h}`);
+  }
+
+  // Runs every rendered frame, for the lifetime of the page — same
+  // rAF-backed clock GSAP's own tweens already use, so this stays in
+  // perfect lockstep with the keyframe camera and every stroke tween.
+  gsap.ticker.add(applyCameraFrame);
+
   function buildCameraTimeline(keyframes) {
     if (!keyframes || keyframes.length === 0) return;
-    const cam = { x: keyframes[0].x, y: keyframes[0].y, w: keyframes[0].w, h: keyframes[0].h };
-    worldEl.setAttribute('viewBox', `${cam.x} ${cam.y} ${cam.w} ${cam.h}`);
+    baseCam.x = keyframes[0].x;
+    baseCam.y = keyframes[0].y;
+    baseCam.w = keyframes[0].w;
+    baseCam.h = keyframes[0].h;
+    applyCameraFrame(); // paint the very first frame immediately, don't wait for the next tick
     for (let i = 1; i < keyframes.length; i++) {
       const kf = keyframes[i];
       // Each move is scheduled at its OWN t_start (via delay), not
       // chained off the previous move's arrival — this is the actual
       // fix for the camera drifting toward the next region while the
       // current sentence was still being written. Between moves GSAP
-      // simply leaves `cam` at its last-set value, which is the hold
-      // behavior we want with zero extra code.
-      gsap.to(cam, {
+      // simply leaves `baseCam` at its last-set value, which is the
+      // hold behavior we want with zero extra code.
+      //
+      // NOTE: this tween now writes into baseCam only — it no longer
+      // touches the viewBox directly. applyCameraFrame (above) is the
+      // single place that ever sets the viewBox, so the keyframe
+      // camera and the pen-tracking layer can never fight over it.
+      gsap.to(baseCam, {
         x: kf.x, y: kf.y, w: kf.w, h: kf.h,
         duration: Math.max(0.01, kf.t_end - kf.t_start),
         delay: kf.t_start,
         ease: kf.ease === 'none' ? 'none' : kf.ease,
-        onUpdate: () => {
-          worldEl.setAttribute('viewBox', `${cam.x} ${cam.y} ${cam.w} ${cam.h}`);
-        },
       });
     }
   }
@@ -112,11 +203,12 @@
     // stroke's real curve — not a synthetic wipe with no relationship
     // to the letter shapes.
     // Icon beats get their paths parented under a stable <g id="icon-...">
-    // instead of straight into contentLayer — this is what a LATER
-    // zoom_in/zoom_out beat's icon_scale targets to grow/shrink THIS
-    // exact icon in place (see animateIconScale below). Text (write
-    // mode) beats have no icon_group_id and just append to
-    // contentLayer directly as before — unaffected.
+    // instead of straight into contentLayer. This grouping isn't
+    // targeted by anything anymore (the icon-enlarge pinch effect that
+    // used to reference it was removed), but it's harmless structure
+    // to keep — cheap insurance for anything that wants to address a
+    // specific icon's group later. Text (write mode) beats have no
+    // icon_group_id and just append to contentLayer directly, unaffected.
     let parent = contentLayer;
     if (beat.icon_group_id) {
       parent = document.getElementById(beat.icon_group_id);
@@ -215,9 +307,8 @@
           // having both active at once, which is what the reveal
           // itself needs) permanently corrupts the stroke into a
           // dashed pattern — confirmed with screenshots before writing
-          // this. Only applied AFTER the reveal is done, purely to
-          // protect against a LATER pinch-enlarge (icon_scale) also
-          // multiplying the stroke width.
+          // this. Applied after the reveal is done so the dasharray
+          // animation itself is never disturbed mid-stroke.
           el.style.strokeDasharray = '';
           el.style.strokeDashoffset = '';
           // BUG FIXED: switching to non-scaling-stroke without ALSO
@@ -242,6 +333,10 @@
     tl.eventCallback('onComplete', () => {
       const activeHand = document.getElementById('active-hand');
       if (activeHand) activeHand.style.display = 'none';
+      // Camera stops tracking the instant the hand disappears — this
+      // is what makes the zoom ease back out to the normal view the
+      // moment a stroke finishes, per the pen-tracking feature above.
+      releasePenTrackTarget();
     });
   }
 
@@ -267,6 +362,27 @@
     return {
       dx: Math.sin(t * 5.4) * ampX + Math.sin(t * 11.3) * ampX * 0.4,
       dy: Math.sin(t * 3.7 + 1.0) * ampY + Math.sin(t * 8.6) * ampY * 0.35,
+    };
+  }
+
+  // ── Shared stroke-tracing callback ──────────────────────────────
+  // Every stroke-reveal call site (single draw/write, icon_word's
+  // icon+label, each row of a multi-row listicle item, and the
+  // erase+relabel rewrite) used to hand-roll the same three lines:
+  // compute jitter, place the hand sprite, done. Centralizing it here
+  // means the pen-tracking camera hook (setPenTrackTarget) only has
+  // to be added in ONE place to cover every one of those cases —
+  // including every row of a multi-row icon_word beat, automatically.
+  //
+  // Feeds the tracker the RAW pen-tip point (px, py), not the
+  // jittered sprite position — jitter is a cosmetic hand wobble, not
+  // a real change in where the ink is landing, and tracking the
+  // jitter would make the CAMERA shake instead of just the hand.
+  function traceHandCallback(h) {
+    return (px, py, angle) => {
+      const j = naturalJitter(performance.now() / 1000, h.h);
+      placeHandSprite(h.file, px + j.dx - h.anchor_x, py + j.dy - h.anchor_y, h.w, h.h, 0, px + j.dx, py + j.dy);
+      setPenTrackTarget(px, py);
     };
   }
 
@@ -456,66 +572,6 @@
     }
   }
 
-  // ── Icon enlarge (pinch in/out scales the ICON, not the camera) ──
-  // Targets the <g id="icon-<concept_key>"> created in
-  // animateStrokeReveal when that concept was originally drawn.
-  // Scales around (cx, cy) — the same world-space point the pinch
-  // hand is placed at — using the standard
-  // translate(cx,cy) scale(s) translate(-cx,-cy) pattern so the icon
-  // grows/shrinks in place instead of drifting off from its corner.
-  function animateIconScale(cfg) {
-    const el = document.getElementById(cfg.target_id);
-    if (!el) {
-      // Nothing drawn under this concept_key as an icon (e.g. it was
-      // a mask_wipe illustration, or the concept_key never matched) —
-      // the pinch hand still plays via hand_swap, just nothing to grow.
-      console.warn(`icon_scale: no element #${cfg.target_id} found, skipping`);
-      return;
-    }
-    const state = { s: 1 };
-    // Read back any existing scale (e.g. a zoom_out beat shrinking an
-    // icon a prior zoom_in already enlarged) rather than assuming 1.
-    const existing = el.getAttribute('data-icon-scale');
-    if (existing) state.s = parseFloat(existing);
-
-    gsap.to(state, {
-      s: cfg.scale,
-      duration: cfg.duration,
-      delay: cfg.swap_at,
-      ease: 'back.out(1.4)',
-      onUpdate: () => {
-        el.setAttribute('transform', `translate(${cfg.cx},${cfg.cy}) scale(${state.s}) translate(${-cfg.cx},${-cfg.cy})`);
-        el.setAttribute('data-icon-scale', state.s);
-      },
-    });
-  }
-
-  // ── Erase + relabel (NEW, opt-in) ──────────────────────────────────
-  // Only ever called when a zoom_in beat explicitly provided
-  // "erase_relabel" data — see render_pipeline.py. Erases the OLD word
-  // next to a zoomed-in icon and writes a NEW one specific to this
-  // sentence, reusing the same erase-hand and write-hand primitives,
-  // and the same stroke-reveal renderer, as everything else.
-  function animateEraseAndRelabel(cfg) {
-    gsap.delayedCall(cfg.erase_start, () => {
-      const eh = cfg.erase_hand;
-      placeHandSprite(eh.file, eh.x, eh.y, eh.w, eh.h, 0);
-      const oldGroup = document.getElementById(cfg.old_label_group_id);
-      if (oldGroup) oldGroup.style.display = 'none';
-    });
-    gsap.delayedCall(cfg.erase_start + cfg.erase_duration, () => {
-      const activeHand = document.getElementById('active-hand');
-      if (activeHand) activeHand.style.display = 'none';
-      if (cfg.new_label_subvisual && cfg.new_label_hand) {
-        const h = cfg.new_label_hand;
-        animateStrokeReveal(cfg.new_label_subvisual, (px, py, angle) => {
-          const j = naturalJitter(performance.now() / 1000, h.h);
-          placeHandSprite(h.file, px + j.dx - h.anchor_x, py + j.dy - h.anchor_y, h.w, h.h, 0, px + j.dx, py + j.dy);
-        });
-      }
-    });
-  }
-
   // ── Beat dispatch ─────────────────────────────────────────────────
   function scheduleBeat(beat) {
     if (beat.mode === 'icon_word' && beat.sub_visuals && beat.hand) {
@@ -533,10 +589,7 @@
         beat.illustration_items.forEach((illus) => animateMaskWipe(illus));
       }
       beat.sub_visuals.forEach((sub) => {
-        animateStrokeReveal(sub, (px, py, angle) => {
-          const j = naturalJitter(performance.now() / 1000, h.h);
-          placeHandSprite(h.file, px + j.dx - h.anchor_x, py + j.dy - h.anchor_y, h.w, h.h, 0, px + j.dx, py + j.dy);
-        });
+        animateStrokeReveal(sub, traceHandCallback(h));
       });
       return;
     }
@@ -549,42 +602,18 @@
       // SAME proven stroke-reveal renderer — one technique, one place
       // for a bug to hide, not two separate hacks to keep in sync.
       const h = beat.hand;
-      animateStrokeReveal(beat, (px, py, angle) => {
-        const j = naturalJitter(performance.now() / 1000, h.h);
-        placeHandSprite(h.file, px + j.dx - h.anchor_x, py + j.dy - h.anchor_y, h.w, h.h, 0, px + j.dx, py + j.dy);
-      });
+      animateStrokeReveal(beat, traceHandCallback(h));
     } else if (beat.mode === 'draw' && beat.illustration_path) {
       animateMaskWipe(beat);
-    } else if (beat.mode === 'point' && beat.hand) {
-      gsap.delayedCall(beat.start, () =>
-        placeHandSprite(beat.hand.file, beat.hand.x, beat.hand.y, beat.hand.w, beat.hand.h, 0));
-      // FIXED: this hand was never hidden afterward — if nothing else
-      // happened to reposition the shared hand sprite for a while, it
-      // just sat there frozen, unmoving, for a long stretch. Auto-hide
-      // after a readable-but-bounded window instead of forever.
-      const pointHideAt = beat.start + Math.min(beat.end - beat.start, 2.0);
-      gsap.delayedCall(pointHideAt, () => {
-        const activeHand = document.getElementById('active-hand');
-        if (activeHand) activeHand.style.display = 'none';
-      });
-    } else if ((beat.mode === 'zoom_in' || beat.mode === 'zoom_out') && beat.hand_swap) {
-      const { start, end, swap_at } = beat.hand_swap;
-      gsap.set({}, { delay: start.x !== undefined ? beat.start : 0 });
-      gsap.delayedCall(beat.start, () =>
-        placeHandSprite(start.file, start.x, start.y, start.w, start.h, 0));
-      gsap.delayedCall(swap_at, () =>
-        placeHandSprite(end.file, end.x, end.y, end.w, end.h, 0));
-      if (beat.icon_scale) {
-        animateIconScale(beat.icon_scale);
-      }
-      if (beat.erase_relabel) {
-        animateEraseAndRelabel(beat.erase_relabel);
-      }
     } else if (beat.mode === 'swipe' && beat.hand_sweep) {
       // FIXED: this was never actually dispatched before — swipe mode
       // set hand_sweep data but nothing in the template ever read it.
       animateSweepHand(beat.hand_sweep);
     }
+    // 'zoom_in'/'zoom_out' beats need no dispatch here at all — they're
+    // now a pure camera move (see render_pipeline.py), driven entirely
+    // by scheduleCameraTransition below and the keyframe timeline. No
+    // hand ever appears for them.
   }
 
   // Camera-transition swipe hand fires on ANY beat that got one
