@@ -294,6 +294,43 @@ def _fetch_internet_archive(query: str) -> list:
 # ══════════════════════════════════════════════════════════════════
 # Public entrypoint
 # ══════════════════════════════════════════════════════════════════
+_TRAILING_YEAR_RE = re.compile(r"\s*\b(1[5-9]\d{2}|20\d{2})\b\s*$")
+
+
+def _broadened_queries(query: str) -> list:
+    """Generates progressively broader search phrases to retry the
+    SOURCE FETCH with (not the CLIP scoring — see resolve() below,
+    which always scores against the original full phrase regardless
+    of which broadened variant actually found candidates).
+
+    Wikimedia Commons' free-text search is picky about exact wording —
+    an auto-generated concept_key like "auschwitz birkenau entrance
+    gate 1945" can return zero results even though Commons has
+    thousands of photos of that exact place, just filed under
+    different words. Rather than hard-failing on the first miss, try:
+      1. the original phrase as-is
+      2. the same phrase with a trailing year stripped (years are the
+         single most common reason an otherwise-good phrase misses,
+         since they rarely appear verbatim in file titles/descriptions)
+      3. progressively fewer trailing words, down to a 2-word floor
+         (e.g. "auschwitz birkenau entrance gate" -> "auschwitz
+         birkenau entrance" -> "auschwitz birkenau")
+    Stops broadening as soon as something demonstrably searchable is
+    found; the CALLER decides whether that's actually a good match via
+    CLIP, this function only decides what's worth asking the sources."""
+    queries = [query]
+    no_year = _TRAILING_YEAR_RE.sub("", query).strip()
+    if no_year and no_year != query:
+        queries.append(no_year)
+    words = no_year.split()
+    while len(words) > 2:
+        words = words[:-1]
+        candidate = " ".join(words)
+        if candidate not in queries:
+            queries.append(candidate)
+    return queries
+
+
 def resolve(query: str, cache_dir: Optional[str] = None) -> Optional["asset_resolver.ResolvedAsset"]:
     """query: free-text search phrase — the beat's concept_key, e.g.
     "Amelia Earhart portrait 1928". Returns an asset_resolver.ResolvedAsset
@@ -304,25 +341,37 @@ def resolve(query: str, cache_dir: Optional[str] = None) -> Optional["asset_reso
     stroke-path line art, so they render the exact same way the
     existing pipeline already renders any non-icon illustration."""
     all_candidates = []
-    for fetcher in (_fetch_wikimedia_commons, _fetch_loc, _fetch_nasa, _fetch_internet_archive):
-        found = fetcher(query)
-        all_candidates.extend(found)
-        # Stop early once we have a healthy pool — no need to hit every
-        # source for every beat once there's enough to CLIP-rank well.
-        if len(all_candidates) >= CANDIDATES_PER_SOURCE * 2:
+    used_query = query
+    for attempt_query in _broadened_queries(query):
+        all_candidates = []
+        for fetcher in (_fetch_wikimedia_commons, _fetch_loc, _fetch_nasa, _fetch_internet_archive):
+            found = fetcher(attempt_query)
+            all_candidates.extend(found)
+            if len(all_candidates) >= CANDIDATES_PER_SOURCE * 2:
+                break
+        if all_candidates:
+            used_query = attempt_query
+            if attempt_query != query:
+                print(f"[historical_assets] '{query}' found nothing verbatim — broadened to "
+                      f"'{attempt_query}' and got {len(all_candidates)} candidate(s)")
             break
 
     if not all_candidates:
-        print(f"[historical_assets] NO CANDIDATES FOUND for '{query}' across Commons/LOC/NASA/IA")
+        print(f"[historical_assets] NO CANDIDATES FOUND for '{query}' across Commons/LOC/NASA/IA, "
+              f"even after broadening through: {_broadened_queries(query)}")
         return None
 
+    # CLIP scoring ALWAYS uses the original full phrase — it's a much
+    # richer semantic signal than whatever broadened phrase happened to
+    # return results, and CLIP's text encoder handles a full descriptive
+    # sentence fine even though Commons' literal-word search couldn't.
     raw_bytes_list = [c.image_bytes for c in all_candidates]
     best_bytes = asset_resolver._clip_best_match(query, raw_bytes_list)
     if best_bytes is None:
         return None
 
     winner = next((c for c in all_candidates if c.image_bytes == best_bytes), all_candidates[0])
-    print(f"[historical_assets] '{query}' -> {winner.source} ({winner.credit_url})")
+    print(f"[historical_assets] '{query}' (searched as '{used_query}') -> {winner.source} ({winner.credit_url})")
 
     if cache_dir:
         os.makedirs(cache_dir, exist_ok=True)
