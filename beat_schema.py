@@ -18,16 +18,18 @@ import json
 import os
 from typing import Optional
 
-# "point" REMOVED per direct feedback (the pointing-finger gesture is no
-# longer wanted). zoom_in/zoom_out are kept as pure camera moves — see
-# render_pipeline.py — so they no longer resolve to a hand gesture either.
-VALID_MODES = {"write", "draw", "icon_word", "zoom_in", "zoom_out", "drag", "erase", "swipe", "talk"}
+# "point" and "zoom_in"/"zoom_out" REMOVED per direct feedback — none
+# of these gestures (pointing finger, pinch-zoom icon enlarge, or the
+# plain camera-only zoom_in/zoom_out that replaced it) are wanted
+# anymore. The only camera behavior beats drive now is the automatic
+# reframe every draw/write/icon_word beat already gets via
+# render_pipeline.py's own _apply_camera_move call — nothing a beat's
+# own "mode" field needs to ask for separately.
+VALID_MODES = {"write", "draw", "icon_word", "drag", "erase", "swipe", "talk"}
 GESTURE_FOR_MODE = {
     "write": "write",
     "draw": "write",       # draw mode still uses the write/pen gesture, just targets an icon instead of text
     "icon_word": "write",  # icon + short label, same pen gesture as draw/write
-    "zoom_in": None,        # pure camera move now — no hand gesture (icon-enlarge pinch removed)
-    "zoom_out": None,       # pure camera move now — no hand gesture (icon-enlarge pinch removed)
     "drag": "drag",
     "erase": "erase",
     "swipe": "swipe",
@@ -53,7 +55,7 @@ def validate_beat(beat: dict, index: int) -> None:
 
     has_items = beat["mode"] == "icon_word" and bool(beat.get("items"))
 
-    if beat["mode"] in ("draw", "zoom_in", "zoom_out", "drag") and "concept_key" not in beat:
+    if beat["mode"] in ("draw", "drag") and "concept_key" not in beat:
         raise BeatValidationError(
             f"beat[{index}] (id={beat['beat_id']}) mode='{beat['mode']}' requires a concept_key"
         )

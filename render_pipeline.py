@@ -412,23 +412,17 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
     # after every beat with an active stroke-reveal or pinch gesture.
     camera_free_at = 0.0
     last_camera_center = _region_center(first_region) if first_region else None
-    # BUG FIXED: icon_group_id used to be generated purely from
-    # concept_key (f"icon-{concept_key}"), with no per-beat
+    # BUG FIXED (historical): icon_group_id used to be generated purely
+    # from concept_key (f"icon-{concept_key}"), with no per-beat
     # disambiguation. If two SEPARATE, unrelated beats picked the same
     # concept_key (e.g. two different sentences both drawing "brain"),
     # their paths landed in the SAME DOM group and both stayed visible
-    # forever, overlapping — confirmed via code read, this is what
-    # produced two simultaneous brain icons. Each draw now gets a
-    # group id unique to THAT beat; this dict tracks which group id is
-    # the CURRENT (most recently drawn) one for a given concept_key, so
-    # zoom_in/zoom_out can still find the right icon to reference.
-    concept_group_ids = {}
-    # Tracks the DOM group holding a single icon_word beat's WORD (not
-    # the icon itself). Currently unused by anything downstream (the
-    # zoom_in/zoom_out relabel feature that used to read this was
-    # removed — see that branch below) but harmless to keep populated
-    # in case a future feature wants it.
-    concept_label_group_ids = {}
+    # forever, overlapping. Each draw still gets a group id unique to
+    # THAT beat (icon_group_id = f"icon-{beat_id}", set on beat_out
+    # below) — that fix stands on its own and needs no extra tracking
+    # dict now that nothing (zoom_in/zoom_out, point, relabel) ever
+    # needs to look up "which group id is this concept_key's icon
+    # right now" — those features are all removed.
     # NEW: sound effect cues — {"file": "...", "start": absolute_seconds}
     # collected as beats are processed, exported at the end for
     # run_render.py to mix into the final audio track. Purely additive:
@@ -515,17 +509,6 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
         camera_free_at = beat_ref["end"]
         last_camera_center = target_center
 
-    # Maps concept_key -> the region it was drawn in, populated as we
-    # process draw/write beats in order. zoom_in/zoom_out beats don't
-    # get their own board slot (they reference something ALREADY
-    # drawn, not new content) — this is what they look their target
-    # region up from. A zoom beat whose concept_key was never drawn
-    # earlier in the script has nothing to reference — that's a
-    # script-authoring problem (the planner referenced a concept before
-    # introducing it), surfaced as a loud error below, not silently
-    # producing an empty beat like it did before this fix.
-    concept_regions = {}
-
     for beat in timed_beats:
         beat_out = {
             "beat_id": beat["beat_id"],
@@ -536,30 +519,6 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
         }
 
         region = board_layout.get(beat["beat_id"])
-        if region and beat.get("concept_key"):
-            concept_regions[beat["concept_key"]] = region
-        # BUG FIXED (confirmed from an actual failed render): the check
-        # above only covers a beat's TOP-LEVEL concept_key — multi-item
-        # icon_word beats don't have one (items replaces it), so any
-        # concept_key drawn INSIDE an items array was never registered
-        # here, even though it genuinely was drawn. A later zoom_in
-        # referencing that concept_key failed with "nothing was drawn
-        # earlier", which was wrong — something WAS drawn, this
-        # registration step just never knew about it.
-        if region and beat.get("items"):
-            for item in beat["items"]:
-                if item.get("type") == "icon" and item.get("concept_key"):
-                    concept_regions[item["concept_key"]] = region
-        if region is None and beat["mode"] in ("zoom_in", "zoom_out"):
-            ck = beat.get("concept_key")
-            region = concept_regions.get(ck)
-            if region is None:
-                raise RuntimeError(
-                    f"beat_id={beat['beat_id']} mode='{beat['mode']}' references concept_key="
-                    f"{ck!r}, but nothing with that concept_key was drawn earlier in this script "
-                    f"— {beat['mode']} needs an existing element to reference. Check the script's "
-                    f"beat order, or that the concept_key matches exactly."
-                )
 
         if beat["mode"] == "write" and region:
             # Text mode: REAL pen strokes via Hershey single-stroke font
@@ -807,7 +766,6 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                             f"icon with no usable <path> data — pick a different concept_key for this row."
                         )
                     icon_group_id = f"icon-{beat['beat_id']}-row{row_idx}"
-                    concept_group_ids[concept_key] = icon_group_id
                     stroke_w = max(0.3, min(3.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"]))
                     sub_visuals.append({
                         "beat_id": f"{beat['beat_id']}-row{row_idx}-icon",
@@ -849,8 +807,6 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                         "w": _grown_w,
                         "h": _grown_h,
                     }
-                    icon_group_id = f"icon-{beat['beat_id']}-row{row_idx}"
-                    concept_group_ids[concept_key] = icon_group_id
                     hand, reveal_style = _illustration_reveal(channel, item_asset_type, image_region)
                     illus_item = {
                         "beat_id": f"{beat['beat_id']}-row{row_idx}-illus",
@@ -976,7 +932,6 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                         f"no usable <path> data — pick a different concept_key for this beat."
                     )
                 icon_group_id = f"icon-{beat['beat_id']}"
-                concept_group_ids[beat.get("concept_key")] = icon_group_id
                 sub_visuals.append({
                     "beat_id": f"{beat['beat_id']}-icon",
                     "subpaths": icon_path_info["subpaths"],
@@ -1060,8 +1015,6 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             text_y = text_region["y"] + (text_region["h"] - font_size) / 2
             stroke_info = text_to_path.text_to_strokes(label, x=text_x, y=text_y, font_size=font_size)
             label_group_id = f"label-{beat['beat_id']}"
-            if beat.get("concept_key"):
-                concept_label_group_ids[beat["concept_key"]] = label_group_id
             sub_visuals.append({
                 "beat_id": f"{beat['beat_id']}-label",
                 "subpaths": stroke_info["subpaths"],
@@ -1101,15 +1054,13 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                         f"concept_key or extend svg_to_path.py to handle primitive shapes."
                     )
                 beat_out["subpaths"] = icon_path_info["subpaths"]
-                # BUG FIXED: was f"icon-{concept_key}" — collided when
-                # two SEPARATE, unrelated beats picked the same
-                # concept_key (e.g. two different sentences both
-                # drawing "brain"), merging their strokes into the
-                # SAME DOM group so both stayed visible forever,
-                # overlapping. Now unique per beat; concept_group_ids
-                # tracks which one is CURRENT for zoom_in/zoom_out.
+                # BUG FIXED (historical): was f"icon-{concept_key}" —
+                # collided when two SEPARATE, unrelated beats picked the
+                # same concept_key (e.g. two different sentences both
+                # drawing "brain"), merging their strokes into the SAME
+                # DOM group so both stayed visible forever, overlapping.
+                # Unique per beat now — that's all this needs to do.
                 icon_group_id = f"icon-{beat['beat_id']}"
-                concept_group_ids[beat.get("concept_key")] = icon_group_id
                 beat_out["icon_group_id"] = icon_group_id
                 # THICKNESS: scale-compensated during the reveal (see
                 # icon_word branch above for the full reasoning) —
@@ -1160,24 +1111,6 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
             _apply_camera_move(beat_out, beat, region, "zoom_in")
-
-        elif beat["mode"] in ("zoom_in", "zoom_out") and region:
-            # SIMPLIFIED PER DIRECT FEEDBACK: "point" mode and the
-            # zoom_in/zoom_out pinch-hand + in-place icon enlarge/
-            # shrink effect (hand_swap / icon_scale / erase_relabel)
-            # are both removed — neither is wanted anymore. zoom_in/
-            # zoom_out are now a PURE camera move: the camera reframes
-            # tighter on (or pulls back from) an already-drawn concept,
-            # with no hand appearing on screen and no change to the
-            # icon's own size. Nothing else about this beat type
-            # changes — it still requires a concept_key that references
-            # something drawn earlier (enforced above), it still drives
-            # the camera timeline via _apply_camera_move below, and a
-            # camera-transition swipe hand can still fire if the camera
-            # move is a big enough jump (that's a property of the
-            # camera move itself, not of this mode).
-            beat_out["region"] = region
-            _apply_camera_move(beat_out, beat, region, beat["mode"])
 
         elif beat["mode"] == "swipe":
             sweep = gesture_engine.scaled_swipe(
