@@ -105,6 +105,21 @@ def _region_center(region: dict) -> tuple:
     return (region["x"] + region["w"] / 2, region["y"] + region["h"] / 2)
 
 
+def _center_text_x(label: str, font_size: float, region: dict) -> float:
+    """Horizontally centers `label` within `region`, using the label's
+    ACTUAL rendered width at font_size (text_to_path.text_advance_width)
+    rather than an estimated left-padding fraction. fit_font_size picks
+    whichever of width/height is the binding constraint — for a short
+    caption in a tall-but-narrow box, height is very often the binding
+    one, which means the rendered text ends up NARROWER than the box's
+    usable width. A fixed left-padding formula has no way to know that,
+    so the word visually reads as flush-left with empty space on the
+    right instead of centered. Measuring the real width and centering
+    against it fixes that regardless of which constraint won."""
+    width = text_to_path.text_advance_width(label, font_size)
+    return region["x"] + (region["w"] - width) / 2
+
+
 def _illustration_reveal(channel: str, asset_type: str, region: dict):
     """Decides how a mask_wipe illustration enters the frame.
 
@@ -698,6 +713,16 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             row_gap = ROW_GAP_FIXED
             row_h = ROW_CONTENT_H
 
+            # NEW: same "layout" idea as the single icon_word beat below —
+            # optional, defaults to the original side-by-side split per row
+            # so every existing script (which never sets this) renders
+            # EXACTLY as before. "stacked" centers EVERY row's icon above
+            # its word instead of icon-left/word-right — this is a
+            # BEAT-level choice (applies uniformly to all rows in this
+            # beat), not per-row, since a beat mixing both looks would be
+            # visually inconsistent within one composition.
+            items_layout = (beat.get("layout") or "side_by_side").strip().lower()
+
             # Same fast/buffered timing fix as the single icon_word
             # branch below — each row's icon+word finishes quickly
             # instead of stretching to fill its slice, and the total
@@ -717,13 +742,36 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             for row_idx, (icon_item, word_item) in enumerate(pairs):
                 row_y = region["y"] + row_idx * (row_h + row_gap)
                 row_region = {"x": region["x"], "y": row_y, "w": region["w"], "h": row_h}
-                icon_w = row_region["w"] * 0.46  # increased from 0.42 — icons/images were reading small
-                gutter = row_region["w"] * 0.05
-                icon_region = {"x": row_region["x"], "y": row_region["y"], "w": icon_w, "h": row_region["h"]}
-                word_region = {
-                    "x": row_region["x"] + icon_w + gutter, "y": row_region["y"],
-                    "w": row_region["w"] - icon_w - gutter, "h": row_region["h"],
-                }
+                if items_layout == "stacked":
+                    # Icon centered on top of THIS row, word centered
+                    # directly below it — same proportions as the single
+                    # icon_word beat's stacked layout, just applied per
+                    # row within the row's own (shorter) height budget.
+                    icon_h = row_region["h"] * 0.62
+                    stack_gap = row_region["h"] * 0.06
+                    word_h = row_region["h"] - icon_h - stack_gap
+                    icon_w = row_region["w"] * 0.5  # narrower inset than the single-beat
+                                                     # version since a row is already compact
+                    icon_region = {
+                        "x": row_region["x"] + (row_region["w"] - icon_w) / 2,
+                        "y": row_region["y"],
+                        "w": icon_w,
+                        "h": icon_h,
+                    }
+                    word_region = {
+                        "x": row_region["x"],
+                        "y": row_region["y"] + icon_h + stack_gap,
+                        "w": row_region["w"],
+                        "h": word_h,
+                    }
+                else:
+                    icon_w = row_region["w"] * 0.46  # increased from 0.42 — icons/images were reading small
+                    gutter = row_region["w"] * 0.05
+                    icon_region = {"x": row_region["x"], "y": row_region["y"], "w": icon_w, "h": row_region["h"]}
+                    word_region = {
+                        "x": row_region["x"] + icon_w + gutter, "y": row_region["y"],
+                        "w": row_region["w"] - icon_w - gutter, "h": row_region["h"],
+                    }
                 row_start = beat["start"] + row_idx * per_row_duration
                 icon_start_t = row_start
                 icon_end_t = icon_start_t + icon_duration
@@ -745,7 +793,8 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                     channel, illustration_cache_dir, asset_type=item_asset_type,
                 )
                 print(f"[render_pipeline] beat_id={beat['beat_id']} row{row_idx} concept_key={concept_key!r} "
-                      f"asset_type={item_asset_type!r} -> resolved: source={item_asset_entry.get('asset_source')}")
+                      f"asset_type={item_asset_type!r} layout={items_layout!r} -> resolved: "
+                      f"source={item_asset_entry.get('asset_source')}")
 
                 if item_asset_entry.get("draw_style") == "stroke_reveal":
                     svg_path = item_asset_entry["asset_ref"].get("path")
@@ -784,11 +833,21 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                     _img_scale = 1.3
                     _cx = icon_region["x"] + icon_region["w"] / 2
                     _cy = icon_region["y"] + icon_region["h"] / 2
+                    _grown_w = icon_region["w"] * _img_scale
+                    _grown_h = icon_region["h"] * _img_scale
+                    if items_layout == "stacked":
+                        # Same reasoning as the single-beat stacked layout:
+                        # a big image growing symmetrically around its
+                        # center would eat into the word directly below
+                        # it, so height growth is clamped to the icon's
+                        # own row box; only width may grow.
+                        _grown_h = icon_region["h"]
+                        _grown_w = min(_grown_w, row_region["w"])
                     image_region = {
-                        "x": _cx - (icon_region["w"] * _img_scale) / 2,
-                        "y": _cy - (icon_region["h"] * _img_scale) / 2,
-                        "w": icon_region["w"] * _img_scale,
-                        "h": icon_region["h"] * _img_scale,
+                        "x": _cx - _grown_w / 2,
+                        "y": _cy - _grown_h / 2,
+                        "w": _grown_w,
+                        "h": _grown_h,
                     }
                     icon_group_id = f"icon-{beat['beat_id']}-row{row_idx}"
                     concept_group_ids[concept_key] = icon_group_id
@@ -812,7 +871,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 usable_w = word_region["w"] * (1 - 2 * pad)
                 usable_h = word_region["h"] * (1 - 2 * pad)
                 font_size = text_to_path.fit_font_size(label, usable_w, usable_h)
-                text_x = word_region["x"] + word_region["w"] * pad
+                text_x = _center_text_x(label, font_size, word_region)
                 text_y = word_region["y"] + (word_region["h"] - font_size) / 2
                 stroke_info = text_to_path.text_to_strokes(label, x=text_x, y=text_y, font_size=font_size)
                 sub_visuals.append({
@@ -989,7 +1048,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             usable_w = text_region["w"] * (1 - 2 * pad)
             usable_h = text_region["h"] * (1 - 2 * pad)
             font_size = text_to_path.fit_font_size(label, usable_w, usable_h)
-            text_x = text_region["x"] + text_region["w"] * pad
+            text_x = _center_text_x(label, font_size, text_region)
             # VERTICALLY CENTERED, not top-anchored (region.y + h*pad) —
             # the icon (icon_to_path_d) fits/centers itself within its
             # own full-height region, so a top-anchored label sat well

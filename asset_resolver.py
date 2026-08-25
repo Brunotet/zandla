@@ -32,6 +32,7 @@ generative at render time" rule).
 """
 import os
 import json
+import re
 import requests
 from io import BytesIO
 from typing import Optional
@@ -255,22 +256,48 @@ def _rasterize_svg(svg_path: str, size: int = 256) -> Optional[bytes]:
 
 
 def _search_vendor_icons(keyword: str, top_k_by_filename: int = 12) -> Optional[str]:
-    """Two-stage search: filename substring match narrows the vendored
-    set down to a manageable shortlist (full CLIP-scoring across
-    20,000+ icons per call would be slow and mostly pointless — a
-    filename match is a strong prior), then CLIP picks the best of
-    that shortlist. Returns an absolute path to the winning SVG, or
-    None if nothing in the vendored set is even filename-plausible."""
+    """Two-stage search: filename match narrows the vendored set down
+    to a manageable shortlist (full CLIP-scoring across 20,000+ icons
+    per call would be slow and mostly pointless — a filename match is
+    a strong prior), then CLIP picks the best of that shortlist.
+    Returns an absolute path to the winning SVG, or None if nothing in
+    the vendored set is even filename-plausible.
+
+    BUG FIXED: matching used to be raw substring containment
+    (`tok in stem`) — for a short, common concept_key like "win", that
+    matches ANY filename merely containing those letters as a
+    substring: "window", "windows-restore", "twin-bed", none of which
+    have anything to do with winning. CLIP then only ever gets to pick
+    the least-bad option from a shortlist that was never actually
+    about the right concept — this is the most likely real cause of a
+    well-chosen but short/common concept_key resolving to an
+    unrelated-looking icon. Word-boundary matching (\\b...\\b) matches
+    "win" as its own standalone word — "win-trophy" or "future win",
+    yes; "window" or "twin", no, since there's no boundary between the
+    "win" letters and the rest of those words. Multi-word concept_keys
+    were mostly safe from this already, since vendored filenames are
+    hyphen/underscore-delimited into the same tokens a concept_key
+    already splits into — this fix mainly protects short, single-word
+    concept_keys, which is exactly where the false positives showed up.
+
+    ALSO FIXED: the top_k_by_filename cutoff used to only `break` the
+    INNER loop (one icon library's file listing) — the outer loop over
+    VENDOR_ICON_DIRS kept going regardless, so the shortlist could
+    silently grow past the intended cap once more than one vendored
+    library was present. Checked before the outer loop continues too now.
+    """
     kw_tokens = keyword.lower().replace("-", " ").replace("_", " ").split()
     shortlist = []
     for lib_name, lib_dir in VENDOR_ICON_DIRS.items():
+        if len(shortlist) >= top_k_by_filename:
+            break
         if not os.path.isdir(lib_dir):
             continue
         for fname in os.listdir(lib_dir):
             if not fname.endswith(".svg"):
                 continue
             stem = fname[:-4].lower().replace("-", " ").replace("_", " ")
-            if any(tok in stem for tok in kw_tokens):
+            if any(re.search(rf"\b{re.escape(tok)}\b", stem) for tok in kw_tokens):
                 shortlist.append(os.path.join(lib_dir, fname))
             if len(shortlist) >= top_k_by_filename:
                 break

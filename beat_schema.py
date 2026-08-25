@@ -69,11 +69,16 @@ def validate_beat(beat: dict, index: int) -> None:
                 f"beat[{index}] (id={beat['beat_id']}) mode='icon_word' requires a non-empty 'label' "
                 f"(the short word/phrase written beside the icon, e.g. concept_key='food', label='good')"
             )
-        # NEW, optional: "layout" picks how the icon and word share the
-        # slot — "side_by_side" (default, icon left / word right) or
-        # "stacked" (icon centered, word centered directly below it).
-        # Omit entirely for the default; only checked when present so
-        # every existing beat (which never sets this) is unaffected.
+
+    if beat["mode"] == "icon_word":
+        # NEW, optional: "layout" picks how icon(s) and word(s) share
+        # their space — "side_by_side" (default, icon left / word right)
+        # or "stacked" (icon centered, word centered directly below it).
+        # Applies to BOTH the single concept_key/label form AND the
+        # multi-row "items" form (where it applies uniformly to every
+        # row). Omit entirely for the default; only checked when
+        # present, so every existing beat (which never sets this) is
+        # unaffected.
         layout = beat.get("layout")
         if layout is not None and layout not in ("side_by_side", "stacked"):
             raise BeatValidationError(

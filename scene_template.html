@@ -84,35 +84,47 @@
                                        // 1.0 would mean no zoom at all; smaller = tighter. This is
                                        // the one number to change if the zoom ever feels too shallow
                                        // or too tight — everything else scales off it automatically.
-  const TRACK_FOLLOW_SMOOTH = 0.20;   // 0-1: how fast the tracked center catches up to the REAL,
-                                       // live pen-tip position each frame. Lower = smoother/laggier
+  const TRACK_FOLLOW_SMOOTH = 0.20;   // 0-1: how much the tracked center catches up to the REAL,
+                                       // live pen-tip position, calibrated at a 60fps reference rate
+                                       // (see applyCameraFrame below — actual smoothing is now
+                                       // frame-rate-independent, so this number means the same thing
+                                       // regardless of the real tick rate). Lower = smoother/laggier
                                        // (better for fast, jittery pen motion); higher = snappier but
                                        // more prone to reading as shaky.
   const TRACK_ENGAGE_SMOOTH = 0.14;   // 0-1: how fast the ZOOM AMOUNT itself eases in when a stroke
                                        // starts and back out when it ends — this is what makes the
                                        // zoom-in/zoom-out feel like a deliberate camera move instead
-                                       // of an instant cut.
+                                       // of an instant cut. Same 60fps-reference-rate note as above.
 
   const baseCam = { x: 0, y: 0, w: 1920, h: 1080 }; // driven by the keyframe timeline below, unchanged in spirit
   const track = {
-    active: false,    // true for every frame a stroke is actively being traced
-    engage: 0,        // 0 = fully on baseCam, 1 = fully on the tight tracked view — eased, not stepped
-    x: 0, y: 0,        // smoothed tracked center, world-space
-    hasTarget: false, // false right after a release, so the FIRST point of a new stroke snaps
-                       // straight there instead of smooth-following in from wherever the last
-                       // stroke ended (which could be a completely different part of the board).
+    active: false,     // true for every frame a stroke is actively being traced
+    engage: 0,         // 0 = fully on baseCam, 1 = fully on the tight tracked view — eased, not stepped
+    x: 0, y: 0,         // SMOOTHED tracked center, world-space — only ever updated inside applyCameraFrame
+    rawX: 0, rawY: 0,   // the actual, unsmoothed live pen-tip position, updated instantly by setPenTrackTarget
+    hasTarget: false,  // false right after a release, so the FIRST point of a new stroke snaps
+                        // straight there instead of smooth-following in from wherever the last
+                        // stroke ended (which could be a completely different part of the board).
   };
 
   function setPenTrackTarget(x, y) {
     track.active = true;
+    track.rawX = x;
+    track.rawY = y;
     if (!track.hasTarget) {
+      // First point of a fresh stroke — snap the smoothed center
+      // straight there rather than easing in from wherever tracking
+      // last left off, which could be a totally different part of
+      // the board (see the engage/follow smoothing note above).
       track.x = x;
       track.y = y;
       track.hasTarget = true;
-    } else {
-      track.x += (x - track.x) * TRACK_FOLLOW_SMOOTH;
-      track.y += (y - track.y) * TRACK_FOLLOW_SMOOTH;
     }
+    // Actual smoothing toward (rawX, rawY) happens once per rendered
+    // frame in applyCameraFrame, not here — this function can be
+    // called multiple times between frames (or even zero times, if a
+    // stroke pauses), so smoothing has to live in the ticker, which
+    // has a real, measured deltaTime, to stay frame-rate-independent.
   }
 
   function releasePenTrackTarget() {
@@ -120,9 +132,28 @@
     track.hasTarget = false;
   }
 
-  function applyCameraFrame() {
+  function applyCameraFrame(time, deltaTime) {
+    // FRAME-RATE-INDEPENDENT SMOOTHING: the original version applied
+    // TRACK_FOLLOW_SMOOTH/TRACK_ENGAGE_SMOOTH as flat per-frame
+    // fractions, which silently assumes a constant ~60fps tick rate —
+    // if the actual render environment ticks at a different or
+    // uneven rate, the SAME constant ends up applying more or less
+    // smoothing than intended. Converting each constant into a decay
+    // rate (via Math.pow) and applying it against the REAL elapsed
+    // time (deltaTime, from GSAP's own ticker) makes the smoothing
+    // amount consistent regardless of tick rate — same visual result
+    // whether frames arrive every 16ms or every 33ms.
+    const dtSeconds = Math.max(0.001, (deltaTime || 16.7) / 1000);
+    const followAlpha = 1 - Math.pow(1 - TRACK_FOLLOW_SMOOTH, dtSeconds * 60);
+    const engageAlpha = 1 - Math.pow(1 - TRACK_ENGAGE_SMOOTH, dtSeconds * 60);
+
+    if (track.hasTarget) {
+      track.x += (track.rawX - track.x) * followAlpha;
+      track.y += (track.rawY - track.y) * followAlpha;
+    }
+
     const goal = track.active ? 1 : 0;
-    track.engage += (goal - track.engage) * TRACK_ENGAGE_SMOOTH;
+    track.engage += (goal - track.engage) * engageAlpha;
     if (Math.abs(track.engage - goal) < 0.001) track.engage = goal;
 
     let view = baseCam;
@@ -148,6 +179,9 @@
   // Runs every rendered frame, for the lifetime of the page — same
   // rAF-backed clock GSAP's own tweens already use, so this stays in
   // perfect lockstep with the keyframe camera and every stroke tween.
+  // GSAP passes (time, deltaTime, frame) to ticker callbacks —
+  // deltaTime (ms since the previous tick) is what makes the
+  // smoothing above frame-rate-independent.
   gsap.ticker.add(applyCameraFrame);
 
   function buildCameraTimeline(keyframes) {
