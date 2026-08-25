@@ -161,9 +161,11 @@ def _mux_audio_with_sfx(video_path: str, narration_path: str, sound_cues: list, 
         # long the visual action actually took — trimmed to the real
         # duration now (atrim, applied on the clip's own 0-based
         # timeline BEFORE the delay shifts it to its actual cue time).
-        # Volume bumped up (0.45 -> 0.65) per direct feedback.
+        # Volume bumped up again (0.65 -> 0.85) per direct feedback —
+        # "increased, not too much, just enough". If it still needs
+        # tuning after a real render, this single number is the knob.
         trim = f"atrim=0:{cue['duration']:.3f}," if cue.get("duration") else ""
-        filter_parts.append(f"[{input_idx}:a]{trim}adelay={delay_ms}|{delay_ms},volume=0.65{label}")
+        filter_parts.append(f"[{input_idx}:a]{trim}adelay={delay_ms}|{delay_ms},volume=0.85{label}")
         mix_labels.append(label)
 
     mix_inputs = "".join(mix_labels)
