@@ -105,6 +105,72 @@ def _region_center(region: dict) -> tuple:
     return (region["x"] + region["w"] / 2, region["y"] + region["h"] / 2)
 
 
+# Subtitles are ONLY built for HISTORICAL_CHANNELS (see build_scene_program's
+# call site below) — every other channel's scene program has no
+# "subtitles" key at all, and scene_template.html only renders them
+# when that key is present, so this is fully opt-in per channel.
+SUBTITLE_MAX_WORDS = 6     # readable chunk size — a whole 15-word sentence
+                            # sitting static on screen doesn't read like real
+                            # captions; short groups that change with the
+                            # voice do.
+SUBTITLE_MAX_CHARS = 42    # standard single-line subtitle length convention
+
+
+def _build_subtitle_cues(timed_beats: list, global_words: list, channel: str) -> list:
+    """Chunks each beat's own real per-word Chatterbox timestamps
+    (the SAME timing data that already drives pen-stroke sync — see
+    the "write" mode's word_groups handling below) into short,
+    readable subtitle groups, each with a precise start/end taken
+    directly from its first/last word's real timestamp.
+
+    Chunking is done WITHIN each beat, never across a beat boundary —
+    beats are one sentence each in the history channel, so this keeps
+    a subtitle from ever straddling two unrelated sentences, even if
+    that means the last chunk of a beat is shorter than the target size.
+
+    Word assignment is a STRICT single-pass cursor (not a tolerance-
+    window filter) — a word right on a beat boundary must land in
+    exactly ONE beat's cues, never two, or it visibly duplicates
+    across two adjacent subtitle lines."""
+    if channel not in HISTORICAL_CHANNELS:
+        return []
+
+    cues = []
+    word_idx = 0
+    n_words = len(global_words)
+
+    for beat in timed_beats:
+        beat_words = []
+        while word_idx < n_words and global_words[word_idx]["start"] < beat["end"]:
+            beat_words.append(global_words[word_idx])
+            word_idx += 1
+        if not beat_words:
+            continue
+
+        chunk = []
+        chunk_chars = 0
+
+        def flush():
+            if chunk:
+                cues.append({
+                    "text": " ".join(w["word"] for w in chunk),
+                    "start": chunk[0]["start"],
+                    "end": chunk[-1]["end"],
+                })
+
+        for w in beat_words:
+            word_len = len(w["word"]) + 1  # +1 for the joining space
+            if chunk and (len(chunk) >= SUBTITLE_MAX_WORDS or chunk_chars + word_len > SUBTITLE_MAX_CHARS):
+                flush()
+                chunk = []
+                chunk_chars = 0
+            chunk.append(w)
+            chunk_chars += word_len
+        flush()
+
+    return cues
+
+
 def _center_text_x(label: str, font_size: float, region: dict) -> float:
     """Horizontally centers `label` within `region`, using the label's
     ACTUAL rendered width at font_size (text_to_path.text_advance_width)
@@ -1138,6 +1204,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
         "camera_keyframes": json.loads(cam.gsap_keyframes_js()),
         "beats": scene_beats,
         "sound_cues": sound_cues,
+        "subtitles": _build_subtitle_cues(timed_beats, timing["words"], channel),
     }
 
 
