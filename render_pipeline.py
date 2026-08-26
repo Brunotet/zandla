@@ -105,72 +105,6 @@ def _region_center(region: dict) -> tuple:
     return (region["x"] + region["w"] / 2, region["y"] + region["h"] / 2)
 
 
-# Subtitles are ONLY built for HISTORICAL_CHANNELS (see build_scene_program's
-# call site below) — every other channel's scene program has no
-# "subtitles" key at all, and scene_template.html only renders them
-# when that key is present, so this is fully opt-in per channel.
-SUBTITLE_MAX_WORDS = 6     # readable chunk size — a whole 15-word sentence
-                            # sitting static on screen doesn't read like real
-                            # captions; short groups that change with the
-                            # voice do.
-SUBTITLE_MAX_CHARS = 42    # standard single-line subtitle length convention
-
-
-def _build_subtitle_cues(timed_beats: list, global_words: list, channel: str) -> list:
-    """Chunks each beat's own real per-word Chatterbox timestamps
-    (the SAME timing data that already drives pen-stroke sync — see
-    the "write" mode's word_groups handling below) into short,
-    readable subtitle groups, each with a precise start/end taken
-    directly from its first/last word's real timestamp.
-
-    Chunking is done WITHIN each beat, never across a beat boundary —
-    beats are one sentence each in the history channel, so this keeps
-    a subtitle from ever straddling two unrelated sentences, even if
-    that means the last chunk of a beat is shorter than the target size.
-
-    Word assignment is a STRICT single-pass cursor (not a tolerance-
-    window filter) — a word right on a beat boundary must land in
-    exactly ONE beat's cues, never two, or it visibly duplicates
-    across two adjacent subtitle lines."""
-    if channel not in HISTORICAL_CHANNELS:
-        return []
-
-    cues = []
-    word_idx = 0
-    n_words = len(global_words)
-
-    for beat in timed_beats:
-        beat_words = []
-        while word_idx < n_words and global_words[word_idx]["start"] < beat["end"]:
-            beat_words.append(global_words[word_idx])
-            word_idx += 1
-        if not beat_words:
-            continue
-
-        chunk = []
-        chunk_chars = 0
-
-        def flush():
-            if chunk:
-                cues.append({
-                    "text": " ".join(w["word"] for w in chunk),
-                    "start": chunk[0]["start"],
-                    "end": chunk[-1]["end"],
-                })
-
-        for w in beat_words:
-            word_len = len(w["word"]) + 1  # +1 for the joining space
-            if chunk and (len(chunk) >= SUBTITLE_MAX_WORDS or chunk_chars + word_len > SUBTITLE_MAX_CHARS):
-                flush()
-                chunk = []
-                chunk_chars = 0
-            chunk.append(w)
-            chunk_chars += word_len
-        flush()
-
-    return cues
-
-
 def _center_text_x(label: str, font_size: float, region: dict) -> float:
     """Horizontally centers `label` within `region`, using the label's
     ACTUAL rendered width at font_size (text_to_path.text_advance_width)
@@ -184,6 +118,74 @@ def _center_text_x(label: str, font_size: float, region: dict) -> float:
     against it fixes that regardless of which constraint won."""
     width = text_to_path.text_advance_width(label, font_size)
     return region["x"] + (region["w"] - width) / 2
+
+
+# How many trailing WORDS of a beat's real narration are held back as
+# pure buffer — no visual is still drawing once the narrator reaches
+# these words, so every beat ends on a clean, fully-drawn frame before
+# the camera moves on. Word-based (not a flat second count) because a
+# fixed time buffer means something different for a fast vs slow
+# sentence; a word count means the same thing regardless of pace.
+ICON_WORD_BUFFER_WORDS = 1
+# Floor so a visual never becomes imperceptibly fast even if its real
+# assigned words were spoken very quickly — a soft floor, not a hard
+# guarantee (see _word_synced_slots' docstring for the one edge case
+# where flooring can cause a small overlap with the next slot; this
+# only matters for word durations far faster than any real narration
+# pace this pipeline actually uses).
+ICON_WORD_MIN_SLOT_DURATION = 0.35
+
+
+def _word_synced_slots(beat_words: list, n_slots: int,
+                        buffer_words: int = ICON_WORD_BUFFER_WORDS,
+                        min_slot_duration: float = ICON_WORD_MIN_SLOT_DURATION):
+    """Splits a beat's REAL per-word Chatterbox timestamps across
+    n_slots visual elements (icon/word pairs — 2 for a single icon_word
+    beat, 2*n_rows for a multi-row items beat), so each visual's
+    on-screen draw duration matches how long the narrator actually took
+    to say ITS share of the sentence, instead of a flat capped duration
+    with no relationship to the sentence's real length or pace. This is
+    the same real-timing approach 'write' mode already uses for letter
+    strokes, applied here to icon/word visuals instead.
+
+    Splits by WORD COUNT (not estimated syllable weight or character
+    count) — a 5-word sentence split across 2 visuals gives one visual
+    ~2-3 words and the other ~2-3 words, by direct request.
+
+    The last `buffer_words` words are excluded entirely from the split
+    — every visual finishes drawing before the narrator even reaches
+    those trailing words, leaving a clean beat of "already drawn,
+    holding" before the camera moves to the next beat.
+
+    Returns a list of (start_t, end_t) absolute-seconds tuples (same
+    timebase as beat['start']/beat['end']), one per slot in order, or
+    None if there aren't enough real per-word timestamps to reliably do
+    this (too few words for the number of visuals this beat needs) —
+    callers fall back to the old fixed-duration scheme in that case,
+    logged loudly, same "never silently do the wrong thing" rule used
+    everywhere else in this pipeline.
+    """
+    if not beat_words:
+        return None
+
+    usable = beat_words[:-buffer_words] if buffer_words > 0 and len(beat_words) > buffer_words else beat_words
+    if len(usable) < n_slots:
+        return None
+
+    n = len(usable)
+    base = n // n_slots
+    remainder = n % n_slots
+    slots = []
+    idx = 0
+    for i in range(n_slots):
+        count = base + (1 if i < remainder else 0)  # remainder words go to the FIRST groups
+        group = usable[idx: idx + count]
+        idx += count
+        start_t, end_t = group[0]["start"], group[-1]["end"]
+        if end_t - start_t < min_slot_duration:
+            end_t = start_t + min_slot_duration
+        slots.append((start_t, end_t))
+    return slots
 
 
 def _illustration_reveal(channel: str, asset_type: str, region: dict):
@@ -748,17 +750,29 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             # visually inconsistent within one composition.
             items_layout = (beat.get("layout") or "side_by_side").strip().lower()
 
-            # Same fast/buffered timing fix as the single icon_word
-            # branch below — each row's icon+word finishes quickly
-            # instead of stretching to fill its slice, and the total
-            # across ALL rows still leaves real buffer before the beat
-            # ends (and the swipe fires).
-            _buffer = 1.1
-            _beat_duration = max(0.01, beat["end"] - beat["start"])
-            _usable = max(1.0, _beat_duration - _buffer)
-            per_row_duration = _usable / n_rows
-            icon_duration = min(0.9, per_row_duration * 0.45)
-            word_duration = min(0.9, per_row_duration * 0.45)
+            # WORD-SYNCED TIMING (replaces the old fixed-duration-cap
+            # scheme per direct feedback): each of this beat's 2*n_rows
+            # visuals (icon, word, icon, word, ...) gets a draw duration
+            # equal to how long the narrator actually took to say ITS
+            # share of the real sentence, not a flat capped guess. Falls
+            # back to the old fixed/proportional scheme — loudly logged,
+            # never silent — if the sentence has too few real words for
+            # this many visuals to each get one.
+            global_words = timing["words"]
+            beat_words = [w for w in global_words if beat["start"] - 0.05 <= w["start"] < beat["end"] + 0.05]
+            n_slots = n_rows * 2
+            word_slots = _word_synced_slots(beat_words, n_slots)
+
+            if word_slots is None:
+                print(f"[render_pipeline] beat_id={beat['beat_id']}: not enough real narration words "
+                      f"({len(beat_words)}) for {n_slots} visuals across {n_rows} row(s) — falling back "
+                      f"to fixed-proportion timing for this beat")
+                _buffer = 1.1
+                _beat_duration = max(0.01, beat["end"] - beat["start"])
+                _usable = max(1.0, _beat_duration - _buffer)
+                per_row_duration = _usable / n_rows
+                icon_duration = min(0.9, per_row_duration * 0.45)
+                word_duration = min(0.9, per_row_duration * 0.45)
 
             sub_visuals = []
             illustration_items = []
@@ -797,11 +811,17 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                         "x": row_region["x"] + icon_w + gutter, "y": row_region["y"],
                         "w": row_region["w"] - icon_w - gutter, "h": row_region["h"],
                     }
-                row_start = beat["start"] + row_idx * per_row_duration
-                icon_start_t = row_start
-                icon_end_t = icon_start_t + icon_duration
-                word_start_t = icon_end_t
-                word_end_t = word_start_t + word_duration
+                if word_slots is not None:
+                    icon_start_t, icon_end_t = word_slots[row_idx * 2]
+                    word_start_t, word_end_t = word_slots[row_idx * 2 + 1]
+                    icon_duration = icon_end_t - icon_start_t
+                    word_duration = word_end_t - word_start_t
+                else:
+                    row_start = beat["start"] + row_idx * per_row_duration
+                    icon_start_t = row_start
+                    icon_end_t = icon_start_t + icon_duration
+                    word_start_t = icon_end_t
+                    word_end_t = word_start_t + word_duration
                 sound_cues.append({"file": "drawing.mp3", "start": icon_start_t, "duration": icon_duration})
                 sound_cues.append({"file": "wrighting.mp3", "start": word_start_t, "duration": word_duration})
 
@@ -967,23 +987,37 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                   f"asset_type={asset_type!r} layout={icon_layout!r} label={label!r} -> resolved: "
                   f"source={asset_entry.get('asset_source')}")
 
-            # BUG FIXED (confirmed from the report): icon/label timing
-            # used to split the beat's FULL duration in half, with the
-            # label always ending at EXACTLY beat['end'] — zero buffer
-            # before the swipe, regardless of how long the sentence's
-            # narration actually was. Icon and label now each get a
-            # fast, capped duration, and the total is bounded well under
-            # the full beat span — guaranteeing real buffer before the
-            # swipe fires, the same way plain "write" mode already does.
-            _icon_word_buffer = 1.1
-            _beat_duration = max(0.01, beat["end"] - beat["start"])
-            _usable = max(1.0, _beat_duration - _icon_word_buffer)
-            icon_duration = min(0.9, _usable * 0.45)
-            label_duration = min(0.9, _usable * 0.45)
-            icon_start_t = beat["start"]
-            icon_end_t = icon_start_t + icon_duration
-            label_start_t = icon_end_t
-            label_end_t = label_start_t + label_duration
+            # WORD-SYNCED TIMING (replaces the old fixed-duration-cap
+            # scheme per direct feedback): icon and label each get a
+            # draw duration equal to how long the narrator actually
+            # took to say their real share of the sentence — roughly
+            # half the sentence's words each — instead of a flat capped
+            # guess with no relationship to the sentence's real length
+            # or pace. Falls back to the old fixed-proportion scheme —
+            # loudly logged, never silent — if the sentence has too few
+            # real words to split in two.
+            global_words = timing["words"]
+            beat_words = [w for w in global_words if beat["start"] - 0.05 <= w["start"] < beat["end"] + 0.05]
+            word_slots = _word_synced_slots(beat_words, 2)
+
+            if word_slots is not None:
+                icon_start_t, icon_end_t = word_slots[0]
+                label_start_t, label_end_t = word_slots[1]
+                icon_duration = icon_end_t - icon_start_t
+                label_duration = label_end_t - label_start_t
+            else:
+                print(f"[render_pipeline] beat_id={beat['beat_id']}: not enough real narration words "
+                      f"({len(beat_words)}) to split between icon and label — falling back to "
+                      f"fixed-proportion timing for this beat")
+                _icon_word_buffer = 1.1
+                _beat_duration = max(0.01, beat["end"] - beat["start"])
+                _usable = max(1.0, _beat_duration - _icon_word_buffer)
+                icon_duration = min(0.9, _usable * 0.45)
+                label_duration = min(0.9, _usable * 0.45)
+                icon_start_t = beat["start"]
+                icon_end_t = icon_start_t + icon_duration
+                label_start_t = icon_end_t
+                label_end_t = label_start_t + label_duration
             sound_cues.append({"file": "drawing.mp3", "start": icon_start_t, "duration": icon_duration})
             sound_cues.append({"file": "wrighting.mp3", "start": label_start_t, "duration": label_duration})
 
@@ -1204,7 +1238,6 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
         "camera_keyframes": json.loads(cam.gsap_keyframes_js()),
         "beats": scene_beats,
         "sound_cues": sound_cues,
-        "subtitles": _build_subtitle_cues(timed_beats, timing["words"], channel),
     }
 
 
