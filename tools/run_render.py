@@ -23,6 +23,23 @@ import subprocess
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import render_pipeline
 
+# Output quality/consistency knobs — one place to tune, applied to BOTH
+# mux paths below (with sfx and narration-only fallback) so they never
+# drift out of sync with each other.
+VIDEO_CRF = "18"        # x264 CRF: lower = higher quality + bigger file. libx264's
+                         # own default is 23 ("fine but visibly compressed" for a
+                         # screen-recorded source); 18 is the commonly cited
+                         # threshold for visually near-lossless output.
+VIDEO_PRESET = "slow"   # better compression efficiency at the SAME CRF than the
+                         # default "medium" — the cost is longer encode time, an
+                         # easy trade to make running in CI rather than interactively.
+OUTPUT_FPS = "30"       # forces a CONSISTENT output frame rate regardless of any
+                         # minor timing variance in Playwright's own screen-capture
+                         # (which isn't guaranteed constant-fps) — this is what
+                         # actually addresses perceived motion "smoothness",
+                         # separate from per-frame crispness (CRF/preset above).
+AUDIO_BITRATE = "192k"  # up from ffmpeg's own aac default (~128k).
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -106,7 +123,9 @@ def _capture_with_playwright(scene_path: str, duration: float, out_path: str, fr
 def _mux_audio(video_path: str, audio_path: str, out_path: str):
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path, "-i", audio_path,
-        "-c:v", "libx264", "-c:a", "aac", "-shortest", out_path,
+        "-c:v", "libx264", "-crf", VIDEO_CRF, "-preset", VIDEO_PRESET,
+        "-pix_fmt", "yuv420p", "-r", OUTPUT_FPS,
+        "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-shortest", out_path,
     ], check=True, capture_output=True)
 
 
@@ -157,7 +176,7 @@ def _mux_audio_with_sfx(video_path: str, narration_path: str, sound_cues: list, 
         input_idx = i + 2  # 0=video, 1=narration, 2.. = sfx clips in order
         delay_ms = int(cue["start"] * 1000)
         label = f"[sfx{i}]"
-        # Volume bumped up again (0.85 -> 2) per direct request. NOTE:
+        # Volume bumped up again (2 -> 2.6) per direct request. NOTE:
         # values above 1.0 amplify beyond the clip's original recorded
         # level, not just "louder relative to narration" — ffmpeg's
         # volume filter doesn't limit/compress, so if a cue's source
@@ -169,7 +188,7 @@ def _mux_audio_with_sfx(video_path: str, narration_path: str, sound_cues: list, 
         # happening — back this number off (e.g. 1.4-1.6) rather than
         # pushing it higher.
         trim = f"atrim=0:{cue['duration']:.3f}," if cue.get("duration") else ""
-        filter_parts.append(f"[{input_idx}:a]{trim}adelay={delay_ms}|{delay_ms},volume=2{label}")
+        filter_parts.append(f"[{input_idx}:a]{trim}adelay={delay_ms}|{delay_ms},volume=2.6{label}")
         mix_labels.append(label)
 
     mix_inputs = "".join(mix_labels)
@@ -186,7 +205,9 @@ def _mux_audio_with_sfx(video_path: str, narration_path: str, sound_cues: list, 
         "ffmpeg", "-y", *inputs,
         "-filter_complex", filter_complex,
         "-map", "0:v", "-map", "[aout]",
-        "-c:v", "libx264", "-c:a", "aac", "-shortest", out_path,
+        "-c:v", "libx264", "-crf", VIDEO_CRF, "-preset", VIDEO_PRESET,
+        "-pix_fmt", "yuv420p", "-r", OUTPUT_FPS,
+        "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-shortest", out_path,
     ]
     try:
         subprocess.run(cmd, check=True, capture_output=True)
