@@ -150,28 +150,31 @@ def _themed_pool_candidates() -> list:
     return candidates
 
 
-def _fetch_full_extract(title: str) -> str:
-    """Real Wikipedia article extract (plain text, several paragraphs)
-    for whichever candidate actually wins — the on_this_day feed's
-    'extract' is often just one summary sentence, not enough factual
-    material for a script writer to work from without either padding
-    with filler or inventing details. This pulls the real thing."""
-    data = _get_json("https://en.wikipedia.org/w/api.php", {
-        "action": "query", "format": "json", "prop": "extracts",
-        "explaintext": 1, "exsectionformat": "plain",
-        "titles": title, "exchars": 2000,
-    })
-    if not data:
-        return ""
-    pages = data.get("query", {}).get("pages", {})
-    for page in pages.values():
-        extract = page.get("extract", "")
-        if extract:
-            return extract
-    return ""
+
+
+SHORTLIST_SIZE = 5  # how many passing candidates to hand back for n8n's
+                      # Gemini ranking step to judge — enough real variety
+                      # to matter, not so many that ranking gets unwieldy
+                      # or that scout's own runtime balloons.
 
 
 def scout(already_used: list) -> dict:
+    """Collects a SHORTLIST of candidates (each already passing dedup +
+    image-coverage checks) instead of committing to the first one that
+    clears the bar — the keyword-based flavor_score above is only used
+    to ORDER which candidates get tried first, not to make the final
+    call on which one is actually worth telling. That judgment call
+    (dramatic AND has a real point, not just shock for its own sake)
+    is Gemini's job now, done downstream in n8n against this shortlist —
+    see the Story Ranker node. This function's job is just: find enough
+    genuinely viable candidates (real image coverage, not already used)
+    to give that ranking step something real to choose between.
+
+    Only a short synopsis (not the full Wikipedia extract) is included
+    per shortlisted candidate — enough for a ranking judgment, without
+    paying for a full-extract fetch on 5 candidates when only 1 will
+    ever actually get used. The full extract is fetched separately,
+    only for whichever subject n8n's ranker actually picks."""
     already_used_norm = {u.strip().lower() for u in already_used if u.strip()}
 
     from datetime import date
@@ -179,12 +182,13 @@ def scout(already_used: list) -> dict:
     all_candidates = _on_this_day_candidates(today.month, today.day)
     all_candidates.sort(key=lambda c: c["score"], reverse=True)
 
-    themed_candidates = None  # fetched lazily, only if on_this_day doesn't produce a winner
+    themed_candidates = None  # fetched lazily, only if on_this_day doesn't produce enough
 
     tried = 0
+    shortlist = []
     pools = [all_candidates]
     pool_idx = 0
-    while tried < MAX_CANDIDATES_TO_TRY:
+    while tried < MAX_CANDIDATES_TO_TRY and len(shortlist) < SHORTLIST_SIZE:
         if pool_idx >= len(pools[0]):
             if themed_candidates is None:
                 print("[scout] on_this_day exhausted — falling back to themed pool")
@@ -202,34 +206,36 @@ def scout(already_used: list) -> dict:
         if subject_key in already_used_norm:
             print(f"[scout] skip (already used): {candidate['subject']}")
             continue
+        # Also skip anything already sitting in THIS run's own shortlist —
+        # themed-pool search results can legitimately return the same
+        # title more than once across different queries.
+        if any(c["subject"].strip().lower() == subject_key for c in shortlist):
+            continue
 
         if not har.has_image_coverage(candidate["subject"]):
             print(f"[scout] skip (no image coverage): {candidate['subject']}")
             continue
 
-        # Winner — pull the real full extract now (cheap on-this-day
-        # entries only had a one-line summary; themed-pool entries had
-        # no extract fetched at all yet).
-        extract = _fetch_full_extract(candidate["subject"])
-        if not extract:
-            print(f"[scout] skip (no fetchable Wikipedia extract): {candidate['subject']}")
-            continue
-
-        return {
-            "found": True,
+        shortlist.append({
             "subject": candidate["subject"],
             "year": candidate.get("year"),
-            "extract": extract,
-            "description": candidate.get("description", ""),
+            "synopsis": candidate.get("extract") or candidate.get("description", ""),
             "wiki_url": candidate.get("wiki_url", ""),
             "source_tier": candidate["tier"],
+        })
+        print(f"[scout] shortlisted ({len(shortlist)}/{SHORTLIST_SIZE}): {candidate['subject']}")
+
+    if not shortlist:
+        return {
+            "found": False,
+            "reason": f"exhausted {tried} candidates across on_this_day + themed pool — "
+                      f"all either already used or had no usable image coverage",
             "candidates_tried": tried,
         }
 
     return {
-        "found": False,
-        "reason": f"exhausted {tried} candidates across on_this_day + themed pool — "
-                  f"all either already used or had no usable image coverage",
+        "found": True,
+        "candidates": shortlist,
         "candidates_tried": tried,
     }
 
