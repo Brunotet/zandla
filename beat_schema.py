@@ -115,6 +115,28 @@ def validate_beat(beat: dict, index: int) -> None:
                     f"beat[{index}] (id={beat['beat_id']}) items[{pair_idx+1}] (word) requires a non-empty label"
                 )
 
+    # NEW, optional: "number" draws a big standalone digit (1, 2, 3...)
+    # in its own row ABOVE the items rows — for a numbered listicle
+    # sentence ("One, you...", "Two, you..."), this puts an actual "1"/
+    # "2" on screen synced to when the narrator says that number word,
+    # with the sentence's real content still drawn as normal icon/word
+    # rows below it. Only meaningful (and only rendered) on an
+    # icon_word beat WITH items — a bare digit with nothing else on
+    # screen isn't useful, so setting it anywhere else is a planner
+    # mistake, surfaced loudly rather than silently ignored.
+    if "number" in beat and beat["number"] is not None:
+        if not has_items:
+            raise BeatValidationError(
+                f"beat[{index}] (id={beat['beat_id']}) sets 'number' but mode='icon_word' has no 'items' — "
+                f"'number' only makes sense alongside a multi-row items beat (it draws the number in its "
+                f"own row above the content rows). Add 'items', or drop 'number' for this beat."
+            )
+        if not isinstance(beat["number"], int) or isinstance(beat["number"], bool) or beat["number"] < 1:
+            raise BeatValidationError(
+                f"beat[{index}] (id={beat['beat_id']}) 'number' must be a positive integer (1, 2, 3, ...) — "
+                f"got {beat['number']!r}"
+            )
+
     if not beat["text"].strip():
         raise BeatValidationError(f"beat[{index}] (id={beat['beat_id']}) has empty text")
 

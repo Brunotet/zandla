@@ -126,7 +126,7 @@ def _center_text_x(label: str, font_size: float, region: dict) -> float:
 # the camera moves on. Word-based (not a flat second count) because a
 # fixed time buffer means something different for a fast vs slow
 # sentence; a word count means the same thing regardless of pace.
-ICON_WORD_BUFFER_WORDS = 1
+ICON_WORD_BUFFER_WORDS = 2
 # Floor so a visual never becomes imperceptibly fast even if its real
 # assigned words were spoken very quickly — a soft floor, not a hard
 # guarantee (see _word_synced_slots' docstring for the one edge case
@@ -317,10 +317,16 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
     target_aspect = frame["width"] / frame["height"]
     CONTENT_W, CONTENT_H = 420, 320  # unchanged content box size for a single-item slot
     MAX_ITEM_ROWS = 3  # icon_word "items" pairs: 2/4/6 entries -> 1/2/3 stacked rows
+    MAX_ROWS_WITH_NUMBER = MAX_ITEM_ROWS + 1  # +1 for the optional standalone number row
+                                               # (see beat_schema.py's "number" field) —
+                                               # used ONLY to size the worst-case tall slot
+                                               # generously enough; a beat without "number"
+                                               # still gets exactly MAX_ITEM_ROWS worth.
 
     def _row_count_for_beat(b: dict) -> int:
         if b.get("mode") == "icon_word" and b.get("items"):
-            return max(1, min(MAX_ITEM_ROWS, len(b["items"]) // 2))
+            content_rows = max(1, min(MAX_ITEM_ROWS, len(b["items"]) // 2))
+            return content_rows + (1 if b.get("number") is not None else 0)
         return 1
 
     # SPACING BUG, FULLY FIXED THIS TIME — last pass only corrected
@@ -339,13 +345,14 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
                           # still visible — trusting the report over my own math this time
     SLOT_W = max(500, fitted["w"] + SAFETY_MARGIN)
     # SLOT_H sized for the TALLEST beat that can land in a row — a
-    # multi-row icon_word beat (up to MAX_ITEM_ROWS stacked pairs) needs
-    # up to 3x the standard content height. Without this, a tall beat's
-    # camera footprint would extend past a row spacing sized only for
-    # the ordinary single-row case, bleeding into the row below — same
+    # multi-row icon_word beat (up to MAX_ROWS_WITH_NUMBER stacked
+    # pairs, including the optional number row) needs up to 4x the
+    # standard content height. Without this, a tall beat's camera
+    # footprint would extend past a row spacing sized only for the
+    # ordinary single-row case, bleeding into the row below — same
     # class of bug as the column one above, triggered by height instead
     # of width.
-    _tall_content_h = ROW_CONTENT_H * MAX_ITEM_ROWS + ROW_GAP_FIXED * (MAX_ITEM_ROWS - 1)
+    _tall_content_h = ROW_CONTENT_H * MAX_ROWS_WITH_NUMBER + ROW_GAP_FIXED * (MAX_ROWS_WITH_NUMBER - 1)
     _tall_fitted = _fit_aspect(region_for_bbox({"x": 0, "y": 0, "w": CONTENT_W, "h": _tall_content_h}, padding=60), target_aspect)
     SLOT_H = max(400, _tall_fitted["h"] + SAFETY_MARGIN)
 
@@ -502,10 +509,19 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
         """Moves the camera toward region_ref (or the default wide view
         if region_ref is None, e.g. for 'swipe'). Duration is derived
         from actual travel distance + real available slack (see
-        _camera_move_duration), not a flat constant. Also attaches a
-        swipe-hand 'camera_transition' that plays IN THE SAME DIRECTION
-        the camera pans, timed to the exact same window — masks the cut
-        the way a real hand sweeping past the lens would."""
+        _camera_move_duration), not a flat constant.
+
+        HAND REMOVED per direct feedback: this used to also attach a
+        transition sweep-hand that passed across the screen on every
+        beat-to-beat camera jump big enough to read as a cut. That hand
+        is gone now — nothing visually covers the cut anymore. The
+        woosh SOUND on a big-enough jump is UNCHANGED (kept exactly as
+        before, same trigger condition, same timing) since only the
+        hand was asked to go. This is a completely separate mechanism
+        from the 'swipe' MODE's own dedicated wipe-hand (a full-board
+        clear at a genuine topic shift, gesture_engine.scaled_swipe
+        called directly in that mode's branch below) — that hand is
+        untouched."""
         nonlocal camera_free_at, last_camera_center
         target_region = region_ref if region_ref is not None else cam.default_view
         target_center = _region_center(target_region)
@@ -517,61 +533,9 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
         if last_camera_center is not None and not skip_transition:
             dx = target_center[0] - last_camera_center[0]
             dy = target_center[1] - last_camera_center[1]
-            # Only spawn a transition hand for a move big enough to
-            # actually read as a cut — a tiny reframe within the same
-            # neighborhood shouldn't flash a hand across the screen.
+            # Same "big enough to read as a cut" threshold as before —
+            # only gates the SOUND now, not a hand.
             if (dx * dx + dy * dy) ** 0.5 > 150:
-                # DIRECTION FIXED — this was backwards before. Spec:
-                # camera pans left -> hand sweeps LEFT-TO-RIGHT,
-                # camera pans right -> hand sweeps RIGHT-TO-LEFT,
-                # camera pans down -> hand sweeps DOWN-TO-UP (and the
-                # symmetric case up -> hand sweeps up-to-down).
-                # Whichever axis the camera moved MORE on is the one
-                # that sweeps (a diagonal row-wrap move picks its
-                # dominant axis rather than doing both at once).
-                if abs(dx) >= abs(dy):
-                    direction = "ltr" if dx < 0 else "rtl"
-                    sweep = gesture_engine.scaled_swipe(
-                        direction=direction, frame_width=frame["width"],
-                        target_height=int(frame["height"] * 0.3),
-                        # Short, centered pass — not edge-to-edge. This
-                        # is the between-SENTENCE transition, not the
-                        # full-board clear ("swipe" mode below still
-                        # uses the default full travel_fraction=1.0).
-                        travel_fraction=0.38,
-                    )
-                else:
-                    direction = "btt" if dy > 0 else "ttb"
-                    sweep = gesture_engine.scaled_swipe(
-                        direction=direction, frame_width=frame["width"],
-                        frame_height=frame["height"],
-                        target_height=int(frame["width"] * 0.3),
-                        travel_fraction=0.38,
-                    )
-                # SPEED FIXED — the hand always travels the full
-                # off-screen-to-off-screen distance regardless of how
-                # far the camera itself panned (which could be a very
-                # short, fast move). Sharing the camera's own duration
-                # made the hand look like a blur relative to the
-                # distance it covered. It now gets its own readable
-                # minimum duration, but is still anchored to arrive at
-                # EXACTLY the same instant the camera does (start time
-                # shifted earlier if needed), so it still genuinely
-                # "matches" the camera move rather than just being a
-                # fixed constant with no relationship to it.
-                move_arrival = camera_free_at + duration
-                sweep_duration = max(0.9, duration)
-                sweep["start"] = move_arrival - sweep_duration
-                sweep["duration"] = sweep_duration
-                beat_out_ref["camera_transition"] = sweep
-                # SOUND FIXED: was using the sweep HAND's own start (which
-                # is deliberately lengthened for visual readability, so it
-                # can start earlier or run longer than the camera itself
-                # actually moves) — the woosh SOUND now uses the camera's
-                # own real start time and real movement duration, so it
-                # starts exactly when the camera starts and stops exactly
-                # when the camera stops, independent of the hand's own
-                # separate visual timing.
                 sound_cues.append({"file": "woosh.mp3", "start": camera_free_at, "duration": duration})
 
         camera_free_at = beat_ref["end"]
@@ -750,22 +714,65 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             # visually inconsistent within one composition.
             items_layout = (beat.get("layout") or "side_by_side").strip().lower()
 
+            # NEW, optional: "number" — for a numbered listicle sentence
+            # ("One, you...", "Two, you..."), draws a big standalone
+            # digit in its own row ABOVE the content rows, synced to
+            # when the narrator actually says that number word. See
+            # beat_schema.py's validation for the field itself.
+            beat_number = beat.get("number")
+            has_number = beat_number is not None
+            row_offset = 1 if has_number else 0  # content rows shift down by one row-height
+
             # WORD-SYNCED TIMING (replaces the old fixed-duration-cap
             # scheme per direct feedback): each of this beat's 2*n_rows
-            # visuals (icon, word, icon, word, ...) gets a draw duration
-            # equal to how long the narrator actually took to say ITS
-            # share of the real sentence, not a flat capped guess. Falls
-            # back to the old fixed/proportional scheme — loudly logged,
-            # never silent — if the sentence has too few real words for
-            # this many visuals to each get one.
+            # content visuals (icon, word, icon, word, ...) gets a draw
+            # duration equal to how long the narrator actually took to
+            # say ITS share of the real sentence, not a flat capped
+            # guess. Falls back to the old fixed/proportional scheme —
+            # loudly logged, never silent — if the sentence has too few
+            # real words for this many visuals to each get one.
+            #
+            # When this beat has a "number", its FIRST real word (e.g.
+            # "One,") is carved out and given directly to the number
+            # visual — not folded into the equal-split pool — since the
+            # number should draw exactly while "One," is spoken, not
+            # get an arbitrary equal share of the whole sentence. The
+            # REST of the sentence's real timing then splits across the
+            # content rows exactly as it would without a number.
             global_words = timing["words"]
             beat_words = [w for w in global_words if beat["start"] - 0.05 <= w["start"] < beat["end"] + 0.05]
+
+            number_start_t = number_end_t = None
+            if has_number:
+                if beat_words:
+                    number_start_t, number_end_t = beat_words[0]["start"], beat_words[0]["end"]
+                    if number_end_t - number_start_t < ICON_WORD_MIN_SLOT_DURATION:
+                        number_end_t = number_start_t + ICON_WORD_MIN_SLOT_DURATION
+                    # Excludes by REAL start time (not just "drop the first
+                    # word") — the min-duration floor above can push
+                    # number_end_t slightly past when the next real word
+                    # naturally starts, which would otherwise let the first
+                    # content visual begin a few milliseconds before the
+                    # number visual has actually finished revealing.
+                    content_words = [w for w in beat_words[1:] if w["start"] >= number_end_t - 1e-6]
+                else:
+                    # No real narration words at all for this beat (shouldn't
+                    # normally happen) — can't sync the number to anything,
+                    # so skip it entirely rather than guess a placement.
+                    print(f"[render_pipeline] beat_id={beat['beat_id']}: 'number' set but no real narration "
+                          f"words found — skipping the number visual for this beat")
+                    has_number = False
+                    row_offset = 0
+                    content_words = beat_words
+            else:
+                content_words = beat_words
+
             n_slots = n_rows * 2
-            word_slots = _word_synced_slots(beat_words, n_slots)
+            word_slots = _word_synced_slots(content_words, n_slots)
 
             if word_slots is None:
                 print(f"[render_pipeline] beat_id={beat['beat_id']}: not enough real narration words "
-                      f"({len(beat_words)}) for {n_slots} visuals across {n_rows} row(s) — falling back "
+                      f"({len(content_words)}) for {n_slots} visuals across {n_rows} row(s) — falling back "
                       f"to fixed-proportion timing for this beat")
                 _buffer = 1.1
                 _beat_duration = max(0.01, beat["end"] - beat["start"])
@@ -778,8 +785,32 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             illustration_items = []
             beat_out["region"] = region
 
+            if has_number:
+                number_row_region = {"x": region["x"], "y": region["y"], "w": region["w"], "h": row_h}
+                number_str = str(beat_number)
+                _num_pad = 0.12
+                _num_usable_w = number_row_region["w"] * (1 - 2 * _num_pad)
+                _num_usable_h = number_row_region["h"] * (1 - 2 * _num_pad)
+                number_font_size = text_to_path.fit_font_size(number_str, _num_usable_w, _num_usable_h)
+                number_x = _center_text_x(number_str, number_font_size, number_row_region)
+                number_y = number_row_region["y"] + (number_row_region["h"] - number_font_size) / 2
+                number_stroke_info = text_to_path.text_to_strokes(
+                    number_str, x=number_x, y=number_y, font_size=number_font_size
+                )
+                sub_visuals.append({
+                    "beat_id": f"{beat['beat_id']}-number",
+                    "subpaths": number_stroke_info["subpaths"],
+                    "stroke_width": max(1.5, number_font_size * 0.045),
+                    "path_transform": None,
+                    "start": number_start_t,
+                    "end": number_end_t,
+                    "min_reveal_duration": number_end_t - number_start_t,
+                })
+                sound_cues.append({"file": "wrighting.mp3", "start": number_start_t,
+                                    "duration": number_end_t - number_start_t})
+
             for row_idx, (icon_item, word_item) in enumerate(pairs):
-                row_y = region["y"] + row_idx * (row_h + row_gap)
+                row_y = region["y"] + (row_idx + row_offset) * (row_h + row_gap)
                 row_region = {"x": region["x"], "y": row_y, "w": region["w"], "h": row_h}
                 if items_layout == "stacked":
                     # Icon centered on top of THIS row, word centered
@@ -817,7 +848,13 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                     icon_duration = icon_end_t - icon_start_t
                     word_duration = word_end_t - word_start_t
                 else:
-                    row_start = beat["start"] + row_idx * per_row_duration
+                    # If this beat has a number, its own reveal already
+                    # claimed the time right at the start of the beat —
+                    # content rows in the fallback path start after it
+                    # finishes instead of at beat['start'], so they don't
+                    # draw simultaneously with the number.
+                    _fallback_row_base = number_end_t if (has_number and number_end_t is not None) else beat["start"]
+                    row_start = _fallback_row_base + row_idx * per_row_duration
                     icon_start_t = row_start
                     icon_end_t = icon_start_t + icon_duration
                     word_start_t = icon_end_t
@@ -929,7 +966,21 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             beat_out["sub_visuals"] = sub_visuals
             if illustration_items:
                 beat_out["illustration_items"] = illustration_items
-            target_height = (region["h"] / max(1, n_rows)) * 0.5
+            # BUG FIXED (confirmed by direct comparison): this used a
+            # 0.5 multiplier on top of the per-row height, while the
+            # single icon_word beat below uses up to 0.85 of its own
+            # (taller) CONTENT_H — for a 2-row beat that worked out to
+            # roughly 119 world-units vs the single-beat's 128-272
+            # range, a real, visible size mismatch, not a rounding
+            # difference. Matching the single-beat's own upper
+            # multiplier (0.85) here keeps the hand a consistent size
+            # regardless of how many rows a beat has — it no longer
+            # shrinks just because there's more content stacked below it.
+            # effective_rows includes the number row (if present) since
+            # region["h"] itself grew to include that row's height too —
+            # dividing by n_rows alone here would OVERESTIMATE the hand.
+            effective_rows = n_rows + row_offset
+            target_height = (region["h"] / max(1, effective_rows)) * 0.85
             beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
             _apply_camera_move(beat_out, beat, region, "zoom_in")
