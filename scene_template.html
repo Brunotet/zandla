@@ -303,12 +303,39 @@
     // min_reveal_duration is now used directly as a fast, fixed
     // target (falling back to the full span only if genuinely absent).
     const totalDuration = beat.min_reveal_duration || Math.max(beat.end - beat.start, 0.3);
+
+    // BUG FIXED (confirmed by direct calculation, not assumed): the
+    // 0.05s-per-subpath floor below exists so a tiny stroke doesn't
+    // reveal in literally zero time — but for a DETAILED icon (many
+    // small subpaths), that floor can push the SUM of every subpath's
+    // duration well past totalDuration (a 20-subpath icon measured at
+    // 29% over in testing). Since the NEXT sub_visual (e.g. the word
+    // right after this icon) is scheduled at its own fixed absolute
+    // start time equal to this icon's intended end, that overflow is
+    // exactly what read as "the reveal already finished writing-wise,
+    // but the hand is still going" — the hand was still animating
+    // this icon's tail end, or worse, still moving after the NEXT
+    // sub_visual had already started its own tween. Rescaling
+    // proportionally (only when needed, only for the length-
+    // proportional/non-real-timing case) guarantees the sum ALWAYS
+    // fits inside totalDuration, so this beat's hand always stops
+    // exactly when the next one is scheduled to take over.
+    let proportionalDurations = null;
+    if (!hasRealTiming) {
+      proportionalDurations = lens.map((len) => Math.max(0.05, totalDuration * (len / totalLen)));
+      const sumDur = proportionalDurations.reduce((a, b) => a + b, 0);
+      if (sumDur > totalDuration) {
+        const scale = totalDuration / sumDur;
+        proportionalDurations = proportionalDurations.map((d) => d * scale);
+      }
+    }
+
     const tl = gsap.timeline({ delay: beat.start });
 
     pathEls.forEach((el, i) => {
       const segDuration = hasRealTiming
         ? Math.max(0.03, beat.segment_durations[i])
-        : Math.max(0.05, totalDuration * (lens[i] / totalLen));
+        : proportionalDurations[i];
       const position = hasRealTiming ? beat.segment_delays[i] : undefined;
 
       tl.to(el.style, {
@@ -402,20 +429,22 @@
   // ── Shared stroke-tracing callback ──────────────────────────────
   // Every stroke-reveal call site (single draw/write, icon_word's
   // icon+label, each row of a multi-row listicle item, and the
-  // erase+relabel rewrite) used to hand-roll the same three lines:
-  // compute jitter, place the hand sprite, done. Centralizing it here
-  // means the pen-tracking camera hook (setPenTrackTarget) only has
-  // to be added in ONE place to cover every one of those cases —
-  // including every row of a multi-row icon_word beat, automatically.
+  // JITTER REMOVED per direct feedback: this used to add a small
+  // deliberate wobble (naturalJitter) to the hand's placement, meant
+  // to look like natural handwriting shake — but the wobble was
+  // applied to the ANCHOR itself (the pivot point passed to
+  // placeHandSprite), which means the PEN TIP was landing slightly
+  // OFF the real ink coordinate on every frame, not just the hand's
+  // body. That's exactly what read as "the pen isn't actually
+  // writing" — the tip now lands EXACTLY on (px, py), the real point
+  // on the revealing stroke, every frame, no offset.
   //
-  // Feeds the tracker the RAW pen-tip point (px, py), not the
-  // jittered sprite position — jitter is a cosmetic hand wobble, not
-  // a real change in where the ink is landing, and tracking the
-  // jitter would make the CAMERA shake instead of just the hand.
+  // Feeds the tracker the pen-tip point (px, py) — this is also what
+  // the pen-tracking camera follows, so it now tracks the exact same
+  // coordinate the tip is drawn at, with nothing to disagree about.
   function traceHandCallback(h) {
     return (px, py, angle) => {
-      const j = naturalJitter(performance.now() / 1000, h.h);
-      placeHandSprite(h.file, px + j.dx - h.anchor_x, py + j.dy - h.anchor_y, h.w, h.h, 0, px + j.dx, py + j.dy);
+      placeHandSprite(h.file, px - h.anchor_x, py - h.anchor_y, h.w, h.h, 0, px, py);
       setPenTrackTarget(px, py);
     };
   }

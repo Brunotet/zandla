@@ -126,7 +126,7 @@ def _center_text_x(label: str, font_size: float, region: dict) -> float:
 # the camera moves on. Word-based (not a flat second count) because a
 # fixed time buffer means something different for a fast vs slow
 # sentence; a word count means the same thing regardless of pace.
-ICON_WORD_BUFFER_WORDS = 2
+ICON_WORD_BUFFER_WORDS = 3
 # Floor so a visual never becomes imperceptibly fast even if its real
 # assigned words were spoken very quickly — a soft floor, not a hard
 # guarantee (see _word_synced_slots' docstring for the one edge case
