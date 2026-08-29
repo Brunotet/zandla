@@ -439,12 +439,51 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════
+# Listicle number-beat enforcement
+# ══════════════════════════════════════════════════════════════════
+def _normalize_listicle_number_beats(beats: List[dict]) -> None:
+    """HARDCODE, not a suggestion, per direct feedback: a numbered listicle
+    beat (mode='icon_word' with 'number' set — e.g. a script sentence
+    starting "One, ...", "Two, ...") must always render as exactly 3
+    visuals total: the number (its own row — already always centered
+    full-width regardless of 'layout', see the has_number branch further
+    down) plus exactly ONE icon+word pair underneath it. Never more.
+
+    The visual planner's prompt already asks Gemini for this, but a prompt
+    is a request, not a guarantee — and rejecting a slightly-off beat via
+    beat_schema.py would kill the ENTIRE render over something trivially
+    fixable. So this enforces it here, in code, unconditionally: if a
+    numbered beat ever comes back with more than one pair (4 or 6 items),
+    keep only the FIRST pair — the one the planner put first is also the
+    one it judged closest to the sentence's core idea — and drop the rest.
+
+    Mutates `beats` in place. Called once, before validate_beat, so
+    validation only ever sees an already-correct beat — no error, no
+    rejected batch, no manual re-run. Every beat WITHOUT 'number' set
+    (i.e. everything that isn't a listicle counting beat) is untouched.
+    """
+    for beat in beats:
+        if beat.get("mode") != "icon_word":
+            continue
+        if beat.get("number") is None:
+            continue
+        items = beat.get("items")
+        if not items or len(items) <= 2:
+            continue
+        beat["items"] = items[:2]
+        print(f"[render_pipeline] beat_id={beat.get('beat_id')}: numbered listicle beat had "
+              f"{len(items)} items — trimmed to the first icon,word pair (2) so it renders as "
+              f"exactly 3 visuals: number, icon, word.")
+
+
+# ══════════════════════════════════════════════════════════════════
 # Scene program assembly
 # ══════════════════════════════════════════════════════════════════
 def build_scene_program(script_text: str, beats: List[dict], channel: str,
                          voice: str = None, illustration_cache_dir: str = "/tmp/illustration_cache",
                          orientation: str = "landscape") -> dict:
     vocab = load_vocabulary(SHARED_LIBRARY_PATH, _channel_library_path(channel))
+    _normalize_listicle_number_beats(beats)
     # Beats can introduce NEW concept_keys not yet in any library — that's fine, they'll be
     # resolved and appended below. validate_batch's vocabulary check is for CATCHING TYPOS
     # against keys that already have curated intent, not for blocking anything new. So we
