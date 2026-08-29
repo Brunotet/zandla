@@ -10,10 +10,17 @@
   .illustration-img { }
   /* Fixed UI layer — deliberately OUTSIDE #world, never touched by camera moves */
   #caption-layer { position: absolute; bottom: 40px; left: 0; right: 0; text-align: center;
-                   font-family: sans-serif; font-size: 42px; color: #1a1a1a; font-weight: 600;
+                   font-family: sans-serif; font-size: 42px; font-weight: 600;
                    text-shadow: -2px -2px 0 #fff, 2px -2px 0 #fff, -2px 2px 0 #fff, 2px 2px 0 #fff,
                                 0 0 12px rgba(255,255,255,0.9);
                    pointer-events: none; }
+  /* One group visible at a time — see scheduleCaptionGroup below. No
+     background/border set here (or on .caption-word) on purpose: the
+     white text-shadow above is the ONLY thing keeping captions legible
+     over any drawn content, exactly like the existing behavior, so the
+     layer stays visually "borderless" rather than a boxed subtitle bar. */
+  .caption-group { display: inline-flex; flex-wrap: wrap; justify-content: center; gap: 0 14px; }
+  .caption-word { display: inline-block; transform-origin: center bottom; }
 </style>
 </head>
 <body>
@@ -635,6 +642,53 @@
     }
   }
 
+  // ── Word-synced captions ────────────────────────────────────────
+  // Pops one word in at a time, exactly on that word's own real
+  // Chatterbox timestamp — not the whole caption line at once — then
+  // the whole line pops back out the instant its last word finishes.
+  // Screen-space, deliberately untouched by camera moves (see the CSS
+  // comment above and camera.py's own note about fixed-layer UI).
+  // Scheduled flat with absolute gsap.delayedCall times at boot, same
+  // convention as every other timed element in this file (camera
+  // keyframes, hand sweep, stroke reveals below).
+  const CAPTION_COLORS = ['#ff5757', '#ffb347', '#3ec98d', '#4d9dff', '#c77dff', '#ff6fb0'];
+
+  function scheduleCaptionGroup(group) {
+    const groupEl = document.createElement('div');
+    groupEl.className = 'caption-group';
+    const wordSpans = group.words.map((w, wordIndex) => {
+      const span = document.createElement('span');
+      span.className = 'caption-word';
+      span.textContent = w.text;
+      span.style.color = CAPTION_COLORS[wordIndex % CAPTION_COLORS.length];
+      groupEl.appendChild(span);
+      return span;
+    });
+
+    group.words.forEach((w, wordIndex) => {
+      gsap.delayedCall(Math.max(0, w.start), () => {
+        if (wordIndex === 0) {
+          // This word starting is this group's real "take over" moment —
+          // clear any leftover previous group even if its own pop-out
+          // tween (scheduled below) hasn't visually finished yet. A
+          // clean cut beats two overlapping captions on screen.
+          captionLayer.querySelectorAll('.caption-group').forEach((el) => el.remove());
+          captionLayer.appendChild(groupEl);
+        }
+        gsap.fromTo(wordSpans[wordIndex], { scale: 0, opacity: 0 }, {
+          scale: 1, opacity: 1, duration: 0.35, ease: 'back.out(1.7)',
+        });
+      });
+    });
+
+    gsap.delayedCall(Math.max(0, group.end), () => {
+      gsap.to(groupEl, {
+        scale: 0.85, opacity: 0, duration: 0.2, ease: 'power1.in',
+        onComplete: () => groupEl.remove(),
+      });
+    });
+  }
+
   // ── Beat dispatch ─────────────────────────────────────────────────
   function scheduleBeat(beat) {
     if (beat.mode === 'icon_word' && beat.sub_visuals && beat.hand) {
@@ -699,6 +753,7 @@
 
     buildCameraTimeline(scene.camera_keyframes);
     scene.beats.forEach(scheduleBeat);
+    (scene.captions || []).forEach(scheduleCaptionGroup);
   }).catch((err) => {
     // Loud, not silent — this exact failure mode (fetch of a file://
     // path failing silently) is what produced a blank first render.

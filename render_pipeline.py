@@ -441,39 +441,173 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
 # ══════════════════════════════════════════════════════════════════
 # Listicle number-beat enforcement
 # ══════════════════════════════════════════════════════════════════
+import re
+
+# Confirmed by direct inspection of real builder-node1 output: Gemini/the
+# builder can silently drop 'number' entirely on a beat whose own sentence
+# text plainly starts "One, ...", "Two, ...", etc. — 'items' comes through
+# fine (icon+word pair, already correct), but with no 'number' key the
+# render never draws the digit row at all, so the video shows only 2
+# visuals instead of 3. A prompt fix and an items-trim can't catch a
+# MISSING key, so this reads the ground truth straight from the beat's own
+# text instead — the one field HARD RULE 1 in the planner prompt
+# guarantees is never edited, so it's more reliable than trusting any
+# upstream node remembered to set 'number' correctly.
+_LISTICLE_NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+_LISTICLE_NUMBER_RE = re.compile(
+    r"^\s*(" + "|".join(_LISTICLE_NUMBER_WORDS.keys()) + r")\s*,", re.IGNORECASE
+)
+
+
+def _detect_listicle_number(text: str):
+    """Returns the integer a sentence's own listicle count word refers to
+    (1 for a sentence starting 'One,', 2 for 'Two,', etc.) or None if the
+    sentence doesn't start that way. Only ever looks at 'text' — never at
+    'number', 'items', or anything else a planner/builder may have set."""
+    if not text:
+        return None
+    m = _LISTICLE_NUMBER_RE.match(text)
+    return _LISTICLE_NUMBER_WORDS[m.group(1).lower()] if m else None
+
+
 def _normalize_listicle_number_beats(beats: List[dict]) -> None:
     """HARDCODE, not a suggestion, per direct feedback: a numbered listicle
-    beat (mode='icon_word' with 'number' set — e.g. a script sentence
-    starting "One, ...", "Two, ...") must always render as exactly 3
-    visuals total: the number (its own row — already always centered
-    full-width regardless of 'layout', see the has_number branch further
-    down) plus exactly ONE icon+word pair underneath it. Never more.
+    beat (a sentence whose own text starts "One, ...", "Two, ...", etc.)
+    must always render as exactly 3 visuals total: the number (its own
+    row — already always centered full-width regardless of 'layout', see
+    the has_number branch further down) plus exactly ONE icon+word pair
+    underneath it. Never more, and never missing.
 
-    The visual planner's prompt already asks Gemini for this, but a prompt
-    is a request, not a guarantee — and rejecting a slightly-off beat via
-    beat_schema.py would kill the ENTIRE render over something trivially
-    fixable. So this enforces it here, in code, unconditionally: if a
-    numbered beat ever comes back with more than one pair (4 or 6 items),
-    keep only the FIRST pair — the one the planner put first is also the
-    one it judged closest to the sentence's core idea — and drop the rest.
+    Two independent problems get fixed here, both confirmed against real
+    pipeline output rather than assumed:
+      1. 'number' can be present but too generous (an upstream planner
+         gave it 4 or 6 items instead of 2) — trimmed to the first pair.
+      2. 'number' can be MISSING ENTIRELY even though the sentence's own
+         text is plainly a counted listicle item (confirmed: builder-node1
+         output showed 'items' correct but no 'number' key at all on
+         "One, ..."/"Two, ..." beats) — detected from the beat's own text
+         and set here, regardless of whether Gemini or the builder node
+         forgot it upstream.
+
+    A beat using the single-concept_key/label form instead of 'items' is
+    converted into a one-pair 'items' list so the detected number has an
+    icon+word row to sit above (beat_schema.py requires 'items' whenever
+    'number' is set). If a detected listicle beat has neither 'items' nor
+    a usable concept_key/label to convert, this leaves 'number' set and
+    logs it loudly rather than fabricating icon/word content.
+
+    NOTE / caveat: this assumes any sentence starting "One,"/"Two,"/etc.
+    followed by a comma is a listicle count word, which matches this
+    channel's real scripts (confirmed) but would misfire on a sentence
+    that coincidentally opens the same way for an unrelated reason (e.g.
+    "One, however, disagreed...") — worth knowing if that phrasing ever
+    shows up in a script.
 
     Mutates `beats` in place. Called once, before validate_beat, so
     validation only ever sees an already-correct beat — no error, no
-    rejected batch, no manual re-run. Every beat WITHOUT 'number' set
-    (i.e. everything that isn't a listicle counting beat) is untouched.
+    rejected batch, no manual re-run. Every beat whose text does NOT
+    start with a listicle count word, and which had no 'number' set
+    either, is completely untouched.
     """
     for beat in beats:
         if beat.get("mode") != "icon_word":
             continue
-        if beat.get("number") is None:
-            continue
+
+        detected_number = _detect_listicle_number(beat.get("text", ""))
+        beat_number = beat.get("number")
+
+        if beat_number is None and detected_number is None:
+            continue  # not a listicle beat at all
+
+        if detected_number is not None and beat_number != detected_number:
+            if beat_number is not None:
+                print(f"[render_pipeline] beat_id={beat.get('beat_id')}: sentence text says "
+                      f"'{detected_number}' but beat had number={beat_number!r} — overriding to "
+                      f"match the sentence's own text.")
+            else:
+                print(f"[render_pipeline] beat_id={beat.get('beat_id')}: sentence text starts "
+                      f"a listicle count ('{detected_number}') but 'number' was missing entirely "
+                      f"— setting it from the sentence text.")
+            beat["number"] = detected_number
+            beat_number = detected_number
+        # else: planner explicitly set 'number' on a beat whose text
+        # doesn't start a spelled-out count — left alone rather than
+        # second-guessed, since that may be an intentional continuation.
+
         items = beat.get("items")
-        if not items or len(items) <= 2:
+        if not items:
+            concept_key, label = beat.get("concept_key"), beat.get("label")
+            if concept_key and label:
+                beat["items"] = [
+                    {"type": "icon", "concept_key": concept_key},
+                    {"type": "word", "label": label},
+                ]
+                beat.pop("concept_key", None)
+                beat.pop("label", None)
+                print(f"[render_pipeline] beat_id={beat.get('beat_id')}: numbered listicle beat "
+                      f"used a single concept_key/label instead of items — converted to a "
+                      f"one-pair items list so its number can render.")
+            else:
+                print(f"[render_pipeline] beat_id={beat.get('beat_id')}: beat_id={beat.get('beat_id')} "
+                      f"looks like a numbered listicle item but has neither 'items' nor a "
+                      f"concept_key/label to draw — leaving 'number' set with no icon/word pair.")
             continue
-        beat["items"] = items[:2]
-        print(f"[render_pipeline] beat_id={beat.get('beat_id')}: numbered listicle beat had "
-              f"{len(items)} items — trimmed to the first icon,word pair (2) so it renders as "
-              f"exactly 3 visuals: number, icon, word.")
+
+        if len(items) > 2:
+            beat["items"] = items[:2]
+            print(f"[render_pipeline] beat_id={beat.get('beat_id')}: numbered listicle beat had "
+                  f"{len(items)} items — trimmed to the first icon,word pair (2) so it renders as "
+                  f"exactly 3 visuals: number, icon, word.")
+
+
+# ══════════════════════════════════════════════════════════════════
+# Word-synced subtitles
+# ══════════════════════════════════════════════════════════════════
+# Per direct request: burned-in captions that pop in one word at a
+# time, exactly on that word's own real Chatterbox timestamp, in
+# screen-space (see camera.py's own note: "Fixed-layer UI (captions,
+# logo, progress bar) does NOT go through this module... deliberately
+# untouched by camera moves" — this was already the intended design,
+# just never wired up). Built straight from `timing["words"]`, the
+# same real per-word start/end times already used elsewhere in this
+# file for stroke-reveal pacing — never estimated or re-derived.
+#
+# This is a caption of the RAW SPOKEN NARRATION, independent of
+# whatever's drawn on the board at that moment — it doesn't read or
+# depend on beats, concept_keys, or labels at all, so it can't be
+# thrown off by anything upstream in the visual-planning side of the
+# pipeline.
+CAPTION_GROUP_SIZE = 4  # words shown together per caption "line" before the
+                         # next group pops in — the one number to change if
+                         # captions ever feel too crowded or too sparse.
+
+
+def _build_captions(words: list, group_size: int = CAPTION_GROUP_SIZE) -> list:
+    """Chunks Chatterbox's flat word list into small caption groups of
+    `group_size` consecutive words. Each group keeps every word's own
+    real start/end time (not just the group's overall start/end) so
+    scene_template.html can pop each word in individually, exactly
+    when it's actually spoken, instead of revealing the whole group
+    at once. A known simplification: grouping is purely by word count,
+    so a group can occasionally straddle a natural sentence boundary —
+    the same trade-off ordinary auto-captions make; not worth the
+    complexity of sentence-aware chunking unless it turns out to look
+    wrong in practice.
+    """
+    groups = []
+    for i in range(0, len(words), group_size):
+        chunk = words[i:i + group_size]
+        if not chunk:
+            continue
+        groups.append({
+            "start": chunk[0]["start"],
+            "end": chunk[-1]["end"],
+            "words": [{"text": w["word"], "start": w["start"], "end": w["end"]} for w in chunk],
+        })
+    return groups
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1328,6 +1462,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
         "camera_keyframes": json.loads(cam.gsap_keyframes_js()),
         "beats": scene_beats,
         "sound_cues": sound_cues,
+        "captions": _build_captions(timing["words"]),
     }
 
 
