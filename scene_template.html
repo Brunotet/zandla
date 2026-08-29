@@ -9,8 +9,8 @@
   .drawable-path { fill: none; stroke: #1a1a1a; stroke-linecap: round; stroke-linejoin: round; }
   .illustration-img { }
   /* Fixed UI layer — deliberately OUTSIDE #world, never touched by camera moves */
-  #caption-layer { position: absolute; bottom: 40px; left: 0; right: 0; text-align: center;
-                   font-family: sans-serif; font-size: 42px; font-weight: 600;
+  #caption-layer { position: absolute; bottom: 220px; left: 0; right: 0; text-align: center;
+                   font-family: sans-serif; font-size: 68px; font-weight: 600;
                    text-shadow: -2px -2px 0 #fff, 2px -2px 0 #fff, -2px 2px 0 #fff, 2px 2px 0 #fff,
                                 0 0 12px rgba(255,255,255,0.9);
                    pointer-events: none; }
@@ -652,15 +652,24 @@
   // convention as every other timed element in this file (camera
   // keyframes, hand sweep, stroke reveals below).
   const CAPTION_COLORS = ['#ff5757', '#ffb347', '#3ec98d', '#4d9dff', '#c77dff', '#ff6fb0'];
+  // Global, not per-group: with CAPTION_GROUP_SIZE=1 every group has
+  // exactly one word, so a per-group index would always be 0 and
+  // every word would render the SAME color instead of cycling —
+  // caught by actually simulating this before shipping it. This
+  // counter advances once per word across the ENTIRE caption sequence
+  // regardless of group size, so color-cycling keeps working even if
+  // CAPTION_GROUP_SIZE is ever turned back up.
+  let captionColorIndex = 0;
 
   function scheduleCaptionGroup(group) {
     const groupEl = document.createElement('div');
     groupEl.className = 'caption-group';
-    const wordSpans = group.words.map((w, wordIndex) => {
+    const wordSpans = group.words.map((w) => {
       const span = document.createElement('span');
       span.className = 'caption-word';
       span.textContent = w.text;
-      span.style.color = CAPTION_COLORS[wordIndex % CAPTION_COLORS.length];
+      span.style.color = CAPTION_COLORS[captionColorIndex % CAPTION_COLORS.length];
+      captionColorIndex++;
       groupEl.appendChild(span);
       return span;
     });

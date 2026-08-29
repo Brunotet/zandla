@@ -580,22 +580,20 @@ def _normalize_listicle_number_beats(beats: List[dict]) -> None:
 # depend on beats, concept_keys, or labels at all, so it can't be
 # thrown off by anything upstream in the visual-planning side of the
 # pipeline.
-CAPTION_GROUP_SIZE = 4  # words shown together per caption "line" before the
-                         # next group pops in — the one number to change if
-                         # captions ever feel too crowded or too sparse.
-
+CAPTION_GROUP_SIZE = 1  # per direct feedback: ONE word visible on screen at a
+                         # time, not several words together — this is the one
+                         # number to change (e.g. back to 3-4) if that's ever
+                         # wanted again; the grouping code below doesn't change.
 
 def _build_captions(words: list, group_size: int = CAPTION_GROUP_SIZE) -> list:
-    """Chunks Chatterbox's flat word list into small caption groups of
-    `group_size` consecutive words. Each group keeps every word's own
-    real start/end time (not just the group's overall start/end) so
-    scene_template.html can pop each word in individually, exactly
-    when it's actually spoken, instead of revealing the whole group
-    at once. A known simplification: grouping is purely by word count,
-    so a group can occasionally straddle a natural sentence boundary —
-    the same trade-off ordinary auto-captions make; not worth the
-    complexity of sentence-aware chunking unless it turns out to look
-    wrong in practice.
+    """Chunks Chatterbox's flat word list into caption groups of
+    `group_size` consecutive words (currently 1 — see above). Each
+    group keeps every word's own real start/end time (not just the
+    group's overall start/end) so scene_template.html can pop each
+    word in individually, exactly when it's actually spoken. A known
+    simplification: grouping is purely by word count, so with a larger
+    group_size a group could straddle a sentence boundary — moot at
+    group_size=1, but worth knowing if this is ever turned back up.
     """
     groups = []
     for i in range(0, len(words), group_size):
