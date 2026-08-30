@@ -120,6 +120,46 @@ def _center_text_x(label: str, font_size: float, region: dict) -> float:
     return region["x"] + (region["w"] - width) / 2
 
 
+def _layout_icon_grid(region: dict, n: int) -> list:
+    """Lays out N pure icons (no word labels — see the 'icons' field on
+    icon_word beats, PSYCHOLOGY CHANNEL ONLY) into a left/right grid, 2
+    per row, per direct spec: N=2 -> one row, left+right. N=3 -> row 1
+    left+right, row 2 has the lone 3rd icon CENTERED (not left-aligned).
+    N=4 -> two full rows of left+right (a 2x2 grid). Generalizes the
+    same way for any N (a trailing lone icon on the last row is always
+    centered), though the visual planner is only ever expected to ask
+    for 1-4. Verified against all 4 cases (1/2/3/4) before integration.
+
+    Returns a list of N {x, y, w, h} icon regions, in the SAME order
+    as the icons were given, top-to-bottom within a row pair, left
+    before right.
+    """
+    if n < 1:
+        raise ValueError(f"_layout_icon_grid requires at least 1 icon, got {n}")
+
+    num_rows = (n + 1) // 2  # ceiling division without needing math.ceil
+    row_h = region["h"] / num_rows
+    col_w = region["w"] / 2
+
+    boxes = []
+    for i in range(n):
+        row = i // 2
+        col = i % 2
+        is_last_row = (row == num_rows - 1)
+        icons_in_this_row = n - row * 2  # only meaningful when is_last_row is True
+        row_y = region["y"] + row * row_h
+
+        if is_last_row and icons_in_this_row == 1:
+            box_w = col_w
+            box_x = region["x"] + (region["w"] - box_w) / 2
+        else:
+            box_w = col_w
+            box_x = region["x"] + col * col_w
+
+        boxes.append({"x": box_x, "y": row_y, "w": box_w, "h": row_h})
+    return boxes
+
+
 # How many trailing WORDS of a beat's real narration are held back as
 # pure buffer — no visual is still drawing once the narrator reaches
 # these words, so every beat ends on a clean, fully-drawn frame before
@@ -189,24 +229,23 @@ def _word_synced_slots(beat_words: list, n_slots: int,
 
 
 def _illustration_reveal(channel: str, asset_type: str, region: dict):
-    """Decides how a mask_wipe illustration enters the frame.
+    """Decides how an illustration/photo enters (and exits) the frame.
 
-    Every OTHER channel's stock-photo fallback keeps the existing
-    drag-hand wipe — a hand tracking a sweeping reveal edge reads fine
-    there because it's still "something being drawn in".
+    CHANGED per direct feedback, applied to the WHOLE pipeline (every
+    channel, every asset_type) — previously only a real historical
+    photo (asset_type="photo" on a HISTORICAL_CHANNELS channel) got a
+    hand-less pop reveal; every other illustration/stock-photo fallback
+    still got a "drag" hand mask-wipe. That mask_wipe/drag pathway is
+    now unused — its code in scene_template.html's animateMaskWipe is
+    left in place rather than deleted, in case this ever needs
+    reverting, but nothing selects it anymore. Every illustration now
+    pops in AND back out, no hand, regardless of channel or asset_type.
 
-    A real historical photo (asset_type="photo" on a HISTORICAL_CHANNELS
-    channel) is different: nothing is actually being drawn, so a hand
-    pretending to trace it into existence reads as an obvious fake.
-    These just pop in instead — no hand at all, see the "pop" case in
-    scene_template.html's animateMaskWipe.
-
-    Returns (mask_wipe_hand_dict_or_None, reveal_style_string).
+    Signature and return shape (mask_wipe_hand_dict_or_None,
+    reveal_style_string) are UNCHANGED on purpose — every call site
+    (single-beat and multi-row) keeps working with zero modification.
     """
-    if asset_type == "photo" and channel in HISTORICAL_CHANNELS:
-        return None, "pop"
-    hand = gesture_engine.scaled_hand("drag", target_height=region["h"] * 0.5).to_dict()
-    return hand, "mask_wipe"
+    return None, "pop"
 
 
 def _channel_library_path(channel: str) -> str:
@@ -326,6 +365,14 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
     def _row_count_for_beat(b: dict) -> int:
         if b.get("mode") == "icon_word" and b.get("items"):
             content_rows = max(1, min(MAX_ITEM_ROWS, len(b["items"]) // 2))
+            return content_rows + (1 if b.get("number") is not None else 0)
+        if b.get("mode") == "icon_word" and b.get("icons"):
+            # Pure icon-only grid (see _layout_icon_grid) — same ceiling
+            # division as that function's own row math, so board slot
+            # sizing actually matches what gets drawn. Capped at 4 icons
+            # elsewhere, so this never exceeds 2 rows in practice; the
+            # MAX_ITEM_ROWS cap is kept anyway for consistency/safety.
+            content_rows = max(1, min(MAX_ITEM_ROWS, (len(b["icons"]) + 1) // 2))
             return content_rows + (1 if b.get("number") is not None else 0)
         return 1
 
@@ -521,6 +568,26 @@ def _normalize_listicle_number_beats(beats: List[dict]) -> None:
 
         if beat_number is None and detected_number is None:
             continue  # not a listicle beat at all
+
+        if beat.get("icons"):
+            # NEW: pure icon-only grid beats (see _layout_icon_grid) are
+            # already structurally complete on their own — no 'items'
+            # pair needed, nothing to convert or trim here. Still apply
+            # the same text-detected number override/fill logic below
+            # (a numbered icon-grid beat deserves the same reliability
+            # guarantee as a numbered items beat), just skip the
+            # items-specific trimming/conversion that follows.
+            if detected_number is not None and beat_number != detected_number:
+                if beat_number is not None:
+                    print(f"[render_pipeline] beat_id={beat.get('beat_id')}: sentence text says "
+                          f"'{detected_number}' but beat had number={beat_number!r} — overriding to "
+                          f"match the sentence's own text.")
+                else:
+                    print(f"[render_pipeline] beat_id={beat.get('beat_id')}: sentence text starts "
+                          f"a listicle count ('{detected_number}') but 'number' was missing entirely "
+                          f"— setting it from the sentence text.")
+                beat["number"] = detected_number
+            continue
 
         if detected_number is not None and beat_number != detected_number:
             if beat_number is not None:
@@ -842,6 +909,167 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 region["h"] * 0.40,
                 min(font_size * 4.6, region["h"] * 0.85),
             )
+            beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
+
+            _apply_camera_move(beat_out, beat, region, "zoom_in")
+
+        elif beat["mode"] == "icon_word" and region and beat.get("icons"):
+            # NEW: pure icon-only listicle items, per direct request —
+            # PSYCHOLOGY CHANNEL ONLY (enforced below, not just left to
+            # the prompt to get right, same "hardcode, don't rely on
+            # upstream alone" discipline as every other channel-specific
+            # behavior in this file). Replaces the icon+word row layout
+            # for beats using "icons" instead of "items": no word
+            # captions at all, just 1-4 icons arranged in a left/right
+            # grid via _layout_icon_grid — one row of 2 for N=2, row 1
+            # left+right + a centered lone icon on row 2 for N=3, a full
+            # 2x2 grid for N=4. Mirrors the "items" branch's number
+            # handling and word-synced timing exactly; the only real
+            # difference is the grid layout and the absence of any word
+            # visuals at all.
+            if channel != "psychology":
+                raise RuntimeError(
+                    f"beat_id={beat['beat_id']}: 'icons' (icon-only grid) is only supported on the "
+                    f"psychology channel per direct request — got channel={channel!r}. Use 'items' "
+                    f"(icon,word pairs) for this channel instead."
+                )
+
+            icons = beat["icons"]
+            if not isinstance(icons, list) or not (1 <= len(icons) <= 4):
+                raise RuntimeError(
+                    f"beat_id={beat['beat_id']}: 'icons' must be a list of 1-4 concept_keys — got {icons!r}"
+                )
+
+            row_gap = ROW_GAP_FIXED
+            row_h = ROW_CONTENT_H
+
+            beat_number = beat.get("number")
+            has_number = beat_number is not None
+            row_offset = 1 if has_number else 0
+
+            global_words = timing["words"]
+            beat_words = [w for w in global_words if beat["start"] - 0.05 <= w["start"] < beat["end"] + 0.05]
+
+            number_start_t = number_end_t = None
+            if has_number:
+                if beat_words:
+                    number_start_t, number_end_t = beat_words[0]["start"], beat_words[0]["end"]
+                    if number_end_t - number_start_t < ICON_WORD_MIN_SLOT_DURATION:
+                        number_end_t = number_start_t + ICON_WORD_MIN_SLOT_DURATION
+                    content_words = [w for w in beat_words[1:] if w["start"] >= number_end_t - 1e-6]
+                else:
+                    print(f"[render_pipeline] beat_id={beat['beat_id']}: 'number' set but no real narration "
+                          f"words found — skipping the number visual for this beat")
+                    has_number = False
+                    row_offset = 0
+                    content_words = beat_words
+            else:
+                content_words = beat_words
+
+            n_icons = len(icons)
+            icon_grid_rows = (n_icons + 1) // 2
+            word_slots = _word_synced_slots(content_words, n_icons)
+
+            if word_slots is None:
+                print(f"[render_pipeline] beat_id={beat['beat_id']}: not enough real narration words "
+                      f"({len(content_words)}) for {n_icons} icons — falling back to fixed-proportion timing")
+                _buffer = 1.1
+                _beat_duration = max(0.01, beat["end"] - beat["start"])
+                _usable = max(1.0, _beat_duration - _buffer)
+                per_icon_duration = _usable / n_icons
+
+            sub_visuals = []
+            beat_out["region"] = region
+
+            if has_number:
+                number_row_region = {"x": region["x"], "y": region["y"], "w": region["w"], "h": row_h}
+                number_str = str(beat_number)
+                _num_pad = 0.12
+                _num_usable_w = number_row_region["w"] * (1 - 2 * _num_pad)
+                _num_usable_h = number_row_region["h"] * (1 - 2 * _num_pad)
+                number_font_size = text_to_path.fit_font_size(number_str, _num_usable_w, _num_usable_h)
+                number_x = _center_text_x(number_str, number_font_size, number_row_region)
+                number_y = number_row_region["y"] + (number_row_region["h"] - number_font_size) / 2
+                number_stroke_info = text_to_path.text_to_strokes(
+                    number_str, x=number_x, y=number_y, font_size=number_font_size
+                )
+                sub_visuals.append({
+                    "beat_id": f"{beat['beat_id']}-number",
+                    "subpaths": number_stroke_info["subpaths"],
+                    "stroke_width": max(1.5, number_font_size * 0.045),
+                    "path_transform": None,
+                    "start": number_start_t,
+                    "end": number_end_t,
+                    "min_reveal_duration": number_end_t - number_start_t,
+                })
+                sound_cues.append({"file": "wrighting.mp3", "start": number_start_t,
+                                    "duration": number_end_t - number_start_t})
+
+            grid_region = {
+                "x": region["x"],
+                "y": region["y"] + row_offset * (row_h + row_gap),
+                "w": region["w"],
+                "h": region["h"] - row_offset * (row_h + row_gap),
+            }
+            icon_boxes = _layout_icon_grid(grid_region, n_icons)
+
+            for i, concept_key_raw in enumerate(icons):
+                concept_key = (concept_key_raw or "").strip()
+                if not concept_key:
+                    raise RuntimeError(f"beat_id={beat['beat_id']}: icons[{i}] is empty")
+
+                if word_slots is not None:
+                    icon_start_t, icon_end_t = word_slots[i]
+                else:
+                    _fallback_base = number_end_t if (has_number and number_end_t is not None) else beat["start"]
+                    icon_start_t = _fallback_base + i * per_icon_duration
+                    icon_end_t = icon_start_t + min(0.9, per_icon_duration * 0.9)
+                sound_cues.append({"file": "drawing.mp3", "start": icon_start_t,
+                                    "duration": icon_end_t - icon_start_t})
+
+                item_asset_entry = resolve_beat_asset(
+                    {"concept_key": concept_key, "beat_id": f"{beat['beat_id']}-icon{i}"},
+                    channel, illustration_cache_dir, asset_type="icon",
+                )
+                print(f"[render_pipeline] beat_id={beat['beat_id']} icon{i} concept_key={concept_key!r} "
+                      f"-> resolved: source={item_asset_entry.get('asset_source')}")
+
+                if item_asset_entry.get("draw_style") != "stroke_reveal":
+                    raise RuntimeError(
+                        f"beat_id={beat['beat_id']}: icons[{i}] concept_key={concept_key!r} resolved to a "
+                        f"non-icon asset (draw_style={item_asset_entry.get('draw_style')!r}) — icon-only "
+                        f"grid items require a real vendored icon match, not a stock photo/illustration "
+                        f"fallback. Add a curated entry or pick a different concept_key."
+                    )
+
+                svg_path = item_asset_entry["asset_ref"].get("path")
+                icon_path_info = svg_to_path.icon_to_path_d(svg_path, icon_boxes[i], padding_ratio=0.08) if svg_path else None
+                if icon_path_info is None:
+                    raise RuntimeError(
+                        f"beat_id={beat['beat_id']}: icons[{i}] concept_key={concept_key!r} resolved to an "
+                        f"icon with no usable <path> data — pick a different concept_key."
+                    )
+                icon_group_id = f"icon-{beat['beat_id']}-grid{i}"
+                stroke_w = max(0.3, min(3.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"]))
+                sub_visuals.append({
+                    "beat_id": f"{beat['beat_id']}-grid{i}-icon",
+                    "subpaths": icon_path_info["subpaths"],
+                    "stroke_width": stroke_w,
+                    "stroke_width_final": stroke_w * icon_path_info["scale"],
+                    "path_transform": icon_path_info["transform"],
+                    "path_offset_x": icon_path_info["offset_x"],
+                    "path_offset_y": icon_path_info["offset_y"],
+                    "path_scale": icon_path_info["scale"],
+                    "icon_group_id": icon_group_id,
+                    "start": icon_start_t,
+                    "end": icon_end_t,
+                    "min_reveal_duration": icon_end_t - icon_start_t,
+                })
+
+            beat_out["sub_visuals"] = sub_visuals
+
+            effective_rows = icon_grid_rows + row_offset
+            target_height = (region["h"] / max(1, effective_rows)) * 0.85
             beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
             _apply_camera_move(beat_out, beat, region, "zoom_in")

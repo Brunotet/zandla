@@ -54,17 +54,30 @@ def validate_beat(beat: dict, index: int) -> None:
         )
 
     has_items = beat["mode"] == "icon_word" and bool(beat.get("items"))
+    # NEW: pure icon-only listicle items (no word labels), added per
+    # direct feedback — PSYCHOLOGY CHANNEL ONLY (enforced in
+    # render_pipeline.py, not here — this file has no notion of
+    # "channel-specific", so the real gate lives where channel is
+    # actually known). Mutually exclusive with 'items': a beat is
+    # either icon,word pairs OR pure icons, never both.
+    has_icons = beat["mode"] == "icon_word" and bool(beat.get("icons"))
+
+    if has_items and has_icons:
+        raise BeatValidationError(
+            f"beat[{index}] (id={beat['beat_id']}) has BOTH 'items' and 'icons' — use one or the "
+            f"other, not both."
+        )
 
     if beat["mode"] in ("draw", "drag") and "concept_key" not in beat:
         raise BeatValidationError(
             f"beat[{index}] (id={beat['beat_id']}) mode='{beat['mode']}' requires a concept_key"
         )
 
-    if beat["mode"] == "icon_word" and not has_items:
+    if beat["mode"] == "icon_word" and not has_items and not has_icons:
         if "concept_key" not in beat:
             raise BeatValidationError(
                 f"beat[{index}] (id={beat['beat_id']}) mode='icon_word' requires a concept_key "
-                f"(or an 'items' list of 2-4 icons/words instead)"
+                f"(or an 'items' list of 2-4 icons/words, or an 'icons' list of 1-4 pure concept_keys)"
             )
         if not str(beat.get("label", "")).strip():
             raise BeatValidationError(
@@ -115,6 +128,19 @@ def validate_beat(beat: dict, index: int) -> None:
                     f"beat[{index}] (id={beat['beat_id']}) items[{pair_idx+1}] (word) requires a non-empty label"
                 )
 
+    if has_icons:
+        icons = beat["icons"]
+        if not isinstance(icons, list) or not (1 <= len(icons) <= 4):
+            raise BeatValidationError(
+                f"beat[{index}] (id={beat['beat_id']}) 'icons' must be a list of 1-4 concept_keys "
+                f"(pure icons, no word labels) — got {icons!r}"
+            )
+        for i, ck in enumerate(icons):
+            if not str(ck or "").strip():
+                raise BeatValidationError(
+                    f"beat[{index}] (id={beat['beat_id']}) icons[{i}] is empty"
+                )
+
     # NEW, optional: "number" draws a big standalone digit (1, 2, 3...)
     # in its own row ABOVE the items rows — for a numbered listicle
     # sentence ("One, you...", "Two, you..."), this puts an actual "1"/
@@ -125,11 +151,12 @@ def validate_beat(beat: dict, index: int) -> None:
     # screen isn't useful, so setting it anywhere else is a planner
     # mistake, surfaced loudly rather than silently ignored.
     if "number" in beat and beat["number"] is not None:
-        if not has_items:
+        if not has_items and not has_icons:
             raise BeatValidationError(
-                f"beat[{index}] (id={beat['beat_id']}) sets 'number' but mode='icon_word' has no 'items' — "
-                f"'number' only makes sense alongside a multi-row items beat (it draws the number in its "
-                f"own row above the content rows). Add 'items', or drop 'number' for this beat."
+                f"beat[{index}] (id={beat['beat_id']}) sets 'number' but mode='icon_word' has neither "
+                f"'items' nor 'icons' — 'number' only makes sense alongside content to draw above (the "
+                f"number draws in its own row above whichever content rows/grid the beat has). Add "
+                f"'items' or 'icons', or drop 'number' for this beat."
             )
         if not isinstance(beat["number"], int) or isinstance(beat["number"], bool) or beat["number"] < 1:
             raise BeatValidationError(
@@ -162,6 +189,12 @@ def validate_beats_against_vocabulary(beats: list, vocabulary: set) -> None:
                 raise BeatValidationError(
                     f"beat[{i}] (id={beat['beat_id']}) items[{item_idx}] references unknown concept_key "
                     f"'{item_ck}' — not present in any concept-library.json. Add it before rendering."
+                )
+        for icon_idx, ck in enumerate(beat.get("icons") or []):
+            if ck and ck not in vocabulary:
+                raise BeatValidationError(
+                    f"beat[{i}] (id={beat['beat_id']}) icons[{icon_idx}] references unknown concept_key "
+                    f"'{ck}' — not present in any concept-library.json. Add it before rendering."
                 )
 
 
