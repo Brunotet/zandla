@@ -158,6 +158,59 @@ def _clip_best_match_index(keyword: str, candidates: list) -> Optional[int]:
         return 0
 
 
+def _clip_rank_indices(keyword: str, candidates: list) -> list:
+    """Like _clip_best_match_index, but returns ALL indices ranked
+    best-to-worst instead of just the single winner. Added per direct
+    request: a caller that needs to FALL BACK to the next-best icon
+    when the top one turns out to be broken (fails to parse, has no
+    usable <path> data, etc.) needs the full ranking, not just index 0.
+
+    On any scoring failure, falls back to the candidates' ORIGINAL
+    order (index 0, 1, 2, ...) rather than raising — same
+    never-block-the-render guarantee as every other CLIP function
+    here; a fallback ranking is still a usable ranking.
+    """
+    if not candidates:
+        return []
+    if len(candidates) == 1:
+        return [0]
+    try:
+        import torch
+        _load_clip()
+
+        imgs, valid_idx = [], []
+        for i, raw in enumerate(candidates):
+            try:
+                im = Image.open(BytesIO(raw)).convert("RGB")
+                imgs.append(_clip_preprocess(im))
+                valid_idx.append(i)
+            except Exception:
+                continue
+        if not imgs:
+            return list(range(len(candidates)))
+
+        image_batch = torch.stack(imgs).to(_clip_device)
+        text = _clip_tokenizer([keyword]).to(_clip_device)
+
+        with torch.no_grad():
+            image_features = _clip_model.encode_image(image_batch)
+            text_features = _clip_model.encode_text(text)
+            image_features /= image_features.norm(dim=-1, keepdim=True)
+            text_features /= text_features.norm(dim=-1, keepdim=True)
+            sims = (image_features @ text_features.T).squeeze(1)
+
+        order = sorted(range(len(valid_idx)), key=lambda k: -float(sims[k]))
+        ranked = [valid_idx[k] for k in order]
+        # Any candidate that failed to even load as an image (skipped
+        # above) goes at the very end — still returned, never dropped,
+        # just correctly deprioritized below everything CLIP could score.
+        skipped = [i for i in range(len(candidates)) if i not in valid_idx]
+        return ranked + skipped
+    except Exception as e:
+        print(f"[assets] CLIP ranking failed for '{keyword}', using original order: {e}")
+        return list(range(len(candidates)))
+
+
 # ══════════════════════════════════════════════════════════════════
 # Stock fetchers — unchanged from render_pipeline.py
 # ══════════════════════════════════════════════════════════════════
@@ -255,66 +308,105 @@ def _rasterize_svg(svg_path: str, size: int = 256) -> Optional[bytes]:
         return None
 
 
-def _search_vendor_icons(keyword: str, top_k_by_filename: int = 12) -> Optional[str]:
+def search_vendor_icon_candidates(keyword: str, top_k_by_filename: int = 12) -> list:
     """Two-stage search: filename match narrows the vendored set down
     to a manageable shortlist (full CLIP-scoring across 20,000+ icons
     per call would be slow and mostly pointless — a filename match is
-    a strong prior), then CLIP picks the best of that shortlist.
-    Returns an absolute path to the winning SVG, or None if nothing in
-    the vendored set is even filename-plausible.
+    a strong prior), then CLIP ranks that shortlist. Returns the FULL
+    ranked list of candidate SVG paths, best-to-worst — not just the
+    single winner (see _search_vendor_icons below for that). Added per
+    direct request: a caller needs this to fall back to the next-best
+    icon when the top one turns out to be broken (fails to parse, has
+    no usable <path> data — see svg_to_path.py's documented LIMITATION
+    on primitive-only icons). Returns an empty list if nothing in the
+    vendored set is even filename-plausible for this keyword.
 
-    BUG FIXED: matching used to be raw substring containment
-    (`tok in stem`) — for a short, common concept_key like "win", that
-    matches ANY filename merely containing those letters as a
-    substring: "window", "windows-restore", "twin-bed", none of which
-    have anything to do with winning. CLIP then only ever gets to pick
-    the least-bad option from a shortlist that was never actually
-    about the right concept — this is the most likely real cause of a
-    well-chosen but short/common concept_key resolving to an
-    unrelated-looking icon. Word-boundary matching (\\b...\\b) matches
-    "win" as its own standalone word — "win-trophy" or "future win",
-    yes; "window" or "twin", no, since there's no boundary between the
-    "win" letters and the rest of those words. Multi-word concept_keys
-    were mostly safe from this already, since vendored filenames are
-    hyphen/underscore-delimited into the same tokens a concept_key
-    already splits into — this fix mainly protects short, single-word
-    concept_keys, which is exactly where the false positives showed up.
+    BUG FIXED (confirmed by tracing the loop, not guessed): the
+    shortlist cap used to be checked BEFORE moving to the next
+    library, in VENDOR_ICON_DIRS iteration order (tabler, phosphor,
+    lucide, iconoir) — so if tabler alone produced >= top_k_by_filename
+    filename matches for a keyword, the outer loop's cap check fired
+    on the very next iteration and phosphor/lucide/iconoir (8,000+
+    icons) were NEVER EVEN LISTED for that keyword. This is a direct,
+    concrete explanation for repetitive/generic icon choices: three of
+    the four libraries could be silently excluded before CLIP ever got
+    a chance to consider anything from them. Every library is now
+    scanned IN FULL for filename matches before any capping happens,
+    and the final shortlist is built by taking matches ROUND-ROBIN
+    across libraries (one from each in turn, cycling) rather than
+    keeping whichever library's matches happened to come first — this
+    is what actually gives every library with a real match a fair shot
+    at reaching the CLIP-scored shortlist.
 
-    ALSO FIXED: the top_k_by_filename cutoff used to only `break` the
-    INNER loop (one icon library's file listing) — the outer loop over
-    VENDOR_ICON_DIRS kept going regardless, so the shortlist could
-    silently grow past the intended cap once more than one vendored
-    library was present. Checked before the outer loop continues too now.
+    Word-boundary filename matching (\\b...\\b) is unchanged from
+    before — still correctly rejects "window"/"twin-bed" matching the
+    concept_key "win", still only affected the shortlist-building
+    stage, not this fix.
     """
     kw_tokens = keyword.lower().replace("-", " ").replace("_", " ").split()
-    shortlist = []
+
+    per_library_matches = {}
     for lib_name, lib_dir in VENDOR_ICON_DIRS.items():
-        if len(shortlist) >= top_k_by_filename:
-            break
         if not os.path.isdir(lib_dir):
             continue
+        matches = []
         for fname in os.listdir(lib_dir):
             if not fname.endswith(".svg"):
                 continue
             stem = fname[:-4].lower().replace("-", " ").replace("_", " ")
             if any(re.search(rf"\b{re.escape(tok)}\b", stem) for tok in kw_tokens):
-                shortlist.append(os.path.join(lib_dir, fname))
+                matches.append(os.path.join(lib_dir, fname))
+        if matches:
+            per_library_matches[lib_name] = matches
+
+    if not per_library_matches:
+        return []
+
+    shortlist = []
+    lib_iters = {name: iter(paths) for name, paths in per_library_matches.items()}
+    while len(shortlist) < top_k_by_filename and lib_iters:
+        exhausted = []
+        for name, it in lib_iters.items():
+            try:
+                shortlist.append(next(it))
+            except StopIteration:
+                exhausted.append(name)
+                continue
             if len(shortlist) >= top_k_by_filename:
                 break
+        for name in exhausted:
+            del lib_iters[name]
 
-    if not shortlist:
-        return None
     if len(shortlist) == 1:
-        return shortlist[0]
+        return shortlist
 
     rasters = [_rasterize_svg(p) for p in shortlist]
     valid = [(p, r) for p, r in zip(shortlist, rasters) if r is not None]
     if not valid:
-        return shortlist[0]
+        # Rasterization itself failed for everything (unlikely, but the
+        # existing single-result function has always tolerated this by
+        # just returning the first candidate) — same fallback here,
+        # returning the whole shortlist in its original order so a
+        # caller retrying candidates still has something to try.
+        return shortlist
 
     paths, raster_bytes = zip(*valid)
-    best_i = _clip_best_match_index(keyword, list(raster_bytes))
-    return paths[best_i] if best_i is not None else paths[0]
+    ranked_local_idx = _clip_rank_indices(keyword, list(raster_bytes))
+    ranked_paths = [paths[i] for i in ranked_local_idx]
+    # Anything that failed to rasterize at all is appended at the end —
+    # still a candidate worth trying if everything CLIP could actually
+    # score turns out to be broken, just correctly deprioritized.
+    failed_to_rasterize = [p for p, r in zip(shortlist, rasters) if r is None]
+    return ranked_paths + failed_to_rasterize
+
+
+def _search_vendor_icons(keyword: str, top_k_by_filename: int = 12) -> Optional[str]:
+    """Single-winner API, UNCHANGED behavior for existing callers
+    (resolve()'s tier-2 check) — now just a thin wrapper around
+    search_vendor_icon_candidates() above, which does the actual work
+    and documents the round-robin library-fairness fix."""
+    candidates = search_vendor_icon_candidates(keyword, top_k_by_filename)
+    return candidates[0] if candidates else None
 
 
 # ══════════════════════════════════════════════════════════════════

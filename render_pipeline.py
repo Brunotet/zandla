@@ -335,6 +335,81 @@ def resolve_beat_asset(beat: dict, channel: str, illustration_cache_dir: str, as
     return entry
 
 
+def resolve_icon_stroke_path(concept_key: str, channel: str, illustration_cache_dir: str,
+                              icon_box: dict, beat_id, max_retry_candidates: int = 4):
+    """Resolves `concept_key` to real, USABLE stroke-reveal path data —
+    not just an asset reference. Added after a real production crash:
+    the old flow trusted whichever single icon resolve_beat_asset/
+    asset_resolver handed back and either used it or raised; there was
+    no way to recover from a broken SVG file (fails to parse, or has
+    no usable <path> data — see svg_to_path.py's documented LIMITATION
+    on primitive-only icons) when a perfectly good sibling icon existed
+    one CLIP-rank down, and no way to recover from a concept that
+    simply has NO vendored icon at all (e.g. "faucet" — legitimately
+    absent from all 4 libraries' filenames) without crashing the whole
+    render.
+
+    Tries, in order:
+      1. The normal cached/resolved entry from resolve_beat_asset — the
+         fast path, unchanged for the common case where it's already a
+         working icon. Zero extra cost when nothing is broken.
+      2. If that entry IS a real icon (draw_style=stroke_reveal) but
+         its SVG FAILS to convert, retries against the next-best
+         vendored candidates (asset_resolver.search_vendor_icon_candidates),
+         up to max_retry_candidates total attempts — and if one works,
+         SELF-HEALS the channel's concept-library.json cache so future
+         renders skip straight to the working icon instead of
+         re-discovering this every time.
+
+    Returns (icon_path_info, asset_entry) on success, or (None,
+    asset_entry) if no vendored icon can be made to work at all — this
+    is NOT necessarily a hard failure; it just means "no real icon
+    exists for this concept", and it's the CALLER's job to decide what
+    that means for its context (fall back to a stock image, or raise).
+    `asset_entry` is always returned (even on failure) so the caller
+    can inspect it (e.g. its draw_style/asset_source) without a second
+    resolve_beat_asset call.
+    """
+    asset_entry = resolve_beat_asset(
+        {"concept_key": concept_key, "beat_id": beat_id}, channel, illustration_cache_dir, asset_type="icon",
+    )
+    if asset_entry.get("draw_style") != "stroke_reveal":
+        return None, asset_entry  # no vendored icon at all for this concept — caller decides fallback
+
+    svg_path = asset_entry["asset_ref"].get("path")
+    icon_path_info = svg_to_path.icon_to_path_d(svg_path, icon_box, padding_ratio=0.08) if svg_path else None
+    if icon_path_info is not None:
+        return icon_path_info, asset_entry  # fast path: the cached/first icon just works
+
+    print(f"[render_pipeline] beat_id={beat_id}: icon at {svg_path!r} for concept_key={concept_key!r} "
+          f"failed to convert (broken SVG or no usable <path> data) — trying the next-best vendored "
+          f"candidate(s)")
+
+    candidates = asset_resolver.search_vendor_icon_candidates(concept_key)
+    tried = {svg_path}
+    for candidate_path in candidates:
+        if candidate_path in tried:
+            continue
+        tried.add(candidate_path)
+        candidate_info = svg_to_path.icon_to_path_d(candidate_path, icon_box, padding_ratio=0.08)
+        if candidate_info is not None:
+            print(f"[render_pipeline] beat_id={beat_id}: concept_key={concept_key!r} recovered using "
+                  f"fallback icon {candidate_path!r} (attempt {len(tried)})")
+            fixed_entry = dict(asset_entry)
+            fixed_entry["asset_ref"] = {"path": candidate_path}
+            channel_lib_path = _channel_library_path(channel)
+            channel_lib = _load_library(channel_lib_path)
+            channel_lib[concept_key] = fixed_entry
+            _save_library(channel_lib_path, channel_lib)
+            return candidate_info, fixed_entry
+        if len(tried) >= max_retry_candidates:
+            break
+
+    print(f"[render_pipeline] beat_id={beat_id}: concept_key={concept_key!r} — ALL vendored candidates "
+          f"tried ({len(tried)}) failed to convert. No usable icon for this concept.")
+    return None, asset_entry
+
+
 # ══════════════════════════════════════════════════════════════════
 # World-space layout
 # ══════════════════════════════════════════════════════════════════
@@ -1013,6 +1088,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             }
             icon_boxes = _layout_icon_grid(grid_region, n_icons)
 
+            illustration_items = []
             for i, concept_key_raw in enumerate(icons):
                 concept_key = (concept_key_raw or "").strip()
                 if not concept_key:
@@ -1027,46 +1103,67 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 sound_cues.append({"file": "drawing.mp3", "start": icon_start_t,
                                     "duration": icon_end_t - icon_start_t})
 
-                item_asset_entry = resolve_beat_asset(
-                    {"concept_key": concept_key, "beat_id": f"{beat['beat_id']}-icon{i}"},
-                    channel, illustration_cache_dir, asset_type="icon",
+                # FIXED after a real production crash: this used to require
+                # draw_style == "stroke_reveal" and raise the ENTIRE render
+                # otherwise — but a concept_key can legitimately have NO
+                # vendored icon match at all (e.g. "faucet" — genuinely
+                # absent from all 4 libraries' filenames), which isn't a
+                # bug, just reality, and shouldn't crash the video. This
+                # now tries real icon resolution WITH retry-across-ranked-
+                # candidates (see resolve_icon_stroke_path — also fixes the
+                # separate case of a broken/unconvertable SVG file when a
+                # working sibling icon exists), and only if truly NO
+                # vendored icon works does it fall back to a small popping
+                # image in the same grid slot instead of crashing.
+                icon_path_info, item_asset_entry = resolve_icon_stroke_path(
+                    concept_key, channel, illustration_cache_dir, icon_boxes[i], f"{beat['beat_id']}-icon{i}",
                 )
                 print(f"[render_pipeline] beat_id={beat['beat_id']} icon{i} concept_key={concept_key!r} "
                       f"-> resolved: source={item_asset_entry.get('asset_source')}")
 
-                if item_asset_entry.get("draw_style") != "stroke_reveal":
-                    raise RuntimeError(
-                        f"beat_id={beat['beat_id']}: icons[{i}] concept_key={concept_key!r} resolved to a "
-                        f"non-icon asset (draw_style={item_asset_entry.get('draw_style')!r}) — icon-only "
-                        f"grid items require a real vendored icon match, not a stock photo/illustration "
-                        f"fallback. Add a curated entry or pick a different concept_key."
-                    )
-
-                svg_path = item_asset_entry["asset_ref"].get("path")
-                icon_path_info = svg_to_path.icon_to_path_d(svg_path, icon_boxes[i], padding_ratio=0.08) if svg_path else None
-                if icon_path_info is None:
-                    raise RuntimeError(
-                        f"beat_id={beat['beat_id']}: icons[{i}] concept_key={concept_key!r} resolved to an "
-                        f"icon with no usable <path> data — pick a different concept_key."
-                    )
-                icon_group_id = f"icon-{beat['beat_id']}-grid{i}"
-                stroke_w = max(0.3, min(3.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"]))
-                sub_visuals.append({
-                    "beat_id": f"{beat['beat_id']}-grid{i}-icon",
-                    "subpaths": icon_path_info["subpaths"],
-                    "stroke_width": stroke_w,
-                    "stroke_width_final": stroke_w * icon_path_info["scale"],
-                    "path_transform": icon_path_info["transform"],
-                    "path_offset_x": icon_path_info["offset_x"],
-                    "path_offset_y": icon_path_info["offset_y"],
-                    "path_scale": icon_path_info["scale"],
-                    "icon_group_id": icon_group_id,
-                    "start": icon_start_t,
-                    "end": icon_end_t,
-                    "min_reveal_duration": icon_end_t - icon_start_t,
-                })
+                if icon_path_info is not None:
+                    icon_group_id = f"icon-{beat['beat_id']}-grid{i}"
+                    stroke_w = max(0.3, min(3.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"]))
+                    sub_visuals.append({
+                        "beat_id": f"{beat['beat_id']}-grid{i}-icon",
+                        "subpaths": icon_path_info["subpaths"],
+                        "stroke_width": stroke_w,
+                        "stroke_width_final": stroke_w * icon_path_info["scale"],
+                        "path_transform": icon_path_info["transform"],
+                        "path_offset_x": icon_path_info["offset_x"],
+                        "path_offset_y": icon_path_info["offset_y"],
+                        "path_scale": icon_path_info["scale"],
+                        "icon_group_id": icon_group_id,
+                        "start": icon_start_t,
+                        "end": icon_end_t,
+                        "min_reveal_duration": icon_end_t - icon_start_t,
+                    })
+                else:
+                    # No vendored icon exists for this concept at all —
+                    # fall back to the resolved stock image, shown as a
+                    # small pop-in/out (see _illustration_reveal, applied
+                    # pipeline-wide) inside this exact grid slot rather
+                    # than failing the whole render over one missing icon.
+                    cached_path = item_asset_entry.get("asset_ref", {}).get("cached_path")
+                    if not cached_path:
+                        raise RuntimeError(
+                            f"beat_id={beat['beat_id']}: icons[{i}] concept_key={concept_key!r} has no "
+                            f"vendored icon AND no stock image fallback either — nothing to draw for "
+                            f"this grid slot. Add a curated entry to concept-library.json."
+                        )
+                    _, reveal_style = _illustration_reveal(channel, "icon", icon_boxes[i])
+                    illustration_items.append({
+                        "beat_id": f"{beat['beat_id']}-grid{i}-illus",
+                        "illustration_path": cached_path,
+                        "illustration_region": icon_boxes[i],
+                        "illustration_start": icon_start_t,
+                        "illustration_end": icon_end_t,
+                        "illustration_reveal": reveal_style,
+                    })
 
             beat_out["sub_visuals"] = sub_visuals
+            if illustration_items:
+                beat_out["illustration_items"] = illustration_items
 
             effective_rows = icon_grid_rows + row_offset
             target_height = (region["h"] / max(1, effective_rows)) * 0.85

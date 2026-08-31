@@ -3,13 +3,18 @@
 <head>
 <meta charset="utf-8">
 <style>
-  html, body { margin: 0; padding: 0; background: #f7f4ed; overflow: hidden; }
+  html, body { margin: 0; padding: 0; overflow: hidden;
+               background-color: #f7f4ed; /* fallback if the image below fails to load */
+               background-image: url('background.jpg');
+               background-size: cover; background-position: center; background-repeat: no-repeat;
+               background-attachment: fixed; }
   #stage { position: relative; }
   #world { width: 100%; height: 100%; display: block; }
   .drawable-path { fill: none; stroke: #1a1a1a; stroke-linecap: round; stroke-linejoin: round; }
   .illustration-img { }
   /* Fixed UI layer — deliberately OUTSIDE #world, never touched by camera moves */
-  #caption-layer { position: absolute; bottom: 270px; left: 0; right: 0; text-align: center;
+  #caption-layer { position: absolute; top: 50%; left: 0; right: 0; text-align: center;
+                   transform: translateY(-50%);
                    font-family: sans-serif; font-size: 68px; font-weight: 600;
                    text-shadow: -2px -2px 0 #fff, 2px -2px 0 #fff, -2px 2px 0 #fff, 2px 2px 0 #fff,
                                 0 0 12px rgba(255,255,255,0.9);
@@ -497,12 +502,11 @@
     const end = cfg.illustration_end !== undefined ? cfg.illustration_end : cfg.end;
     const duration = Math.max(0.05, end - start);
 
-    // POP-IN reveal — used for real historical photos (asset_type
-    // "photo" on the history channel — see render_pipeline.py's
-    // _illustration_reveal). No hand at all: a hand pretending to
-    // "draw" a real photograph into existence reads as an obvious
-    // fake, since nothing is actually being drawn. Just a quick
-    // fade+scale so the photo arrives cleanly instead.
+    // POP-IN / POP-OUT reveal — now used for EVERY illustration/photo,
+    // every channel (see render_pipeline.py's _illustration_reveal,
+    // which now always returns "pop"). No hand at all: a hand
+    // pretending to "draw" a photo/illustration into existence reads
+    // as an obvious fake, since nothing is actually being drawn.
     if (cfg.illustration_reveal === 'pop' || !cfg.mask_wipe_hand) {
       const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
       img.setAttribute('x', region.x);
@@ -525,6 +529,23 @@
           img.setAttribute('transform', `translate(${cx},${cy}) scale(${scaleState.s}) translate(${-cx},${-cy})`);
         },
       }, 0);
+
+      // POP-OUT — added per direct feedback; previously this image
+      // just stayed on screen forever once popped in, with no exit
+      // animation at all. Symmetric bounce to the pop-in above,
+      // scheduled at this illustration's own real end time so only
+      // one image is ever visible on screen for its assigned window.
+      const outDuration = Math.min(0.3, popDuration);
+      gsap.delayedCall(Math.max(0, end), () => {
+        gsap.to(img.style, { opacity: 0, duration: outDuration, ease: 'power1.in' });
+        gsap.to(scaleState, {
+          s: 0.85, duration: outDuration, ease: 'back.in(1.6)',
+          onUpdate: () => {
+            img.setAttribute('transform', `translate(${cx},${cy}) scale(${scaleState.s}) translate(${-cx},${-cy})`);
+          },
+          onComplete: () => img.remove(),
+        });
+      });
       return;
     }
 
