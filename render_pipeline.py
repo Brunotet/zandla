@@ -598,28 +598,34 @@ def _detect_listicle_number(text: str):
 def _normalize_listicle_number_beats(beats: List[dict]) -> None:
     """HARDCODE, not a suggestion, per direct feedback: a numbered listicle
     beat (a sentence whose own text starts "One, ...", "Two, ...", etc.)
-    must always render as exactly 3 visuals total: the number (its own
-    row — already always centered full-width regardless of 'layout', see
-    the has_number branch further down) plus exactly ONE icon+word pair
-    underneath it. Never more, and never missing.
+    must always render with the number in its own row — already always
+    centered full-width regardless of "layout" — plus content underneath
+    it. Never missing.
 
-    Two independent problems get fixed here, both confirmed against real
-    pipeline output rather than assumed:
+    On the PSYCHOLOGY channel specifically, that content is now ALWAYS
+    icon-only (see the channel-check below) — a prompt asking Gemini for
+    "icons" instead of icon+word "items" is a request, not a guarantee,
+    and this converts whatever shape the beat actually arrived in
+    (icon+word "items", or a single concept_key/label) into pure
+    "icons", dropping the word label(s) entirely, so a real mixture
+    (regular sentences keep icon+word; every COUNTED item is icon-only)
+    is actually guaranteed rather than hoped for.
+
+    Three independent problems get fixed here, all confirmed against
+    real pipeline output rather than assumed:
       1. 'number' can be present but too generous (an upstream planner
-         gave it 4 or 6 items instead of 2) — trimmed to the first pair.
+         gave it 4 or 6 items instead of 2) — trimmed to the first pair
+         (non-psychology channels only — see above for psychology).
       2. 'number' can be MISSING ENTIRELY even though the sentence's own
          text is plainly a counted listicle item (confirmed: builder-node1
          output showed 'items' correct but no 'number' key at all on
          "One, ..."/"Two, ..." beats) — detected from the beat's own text
          and set here, regardless of whether Gemini or the builder node
          forgot it upstream.
-
-    A beat using the single-concept_key/label form instead of 'items' is
-    converted into a one-pair 'items' list so the detected number has an
-    icon+word row to sit above (beat_schema.py requires 'items' whenever
-    'number' is set). If a detected listicle beat has neither 'items' nor
-    a usable concept_key/label to convert, this leaves 'number' set and
-    logs it loudly rather than fabricating icon/word content.
+      3. A numbered beat can arrive as icon+word 'items' (or a single
+         concept_key/label) instead of icon-only 'icons' on the
+         psychology channel — converted here, confirmed against a real
+         render where every listicle item still showed icon+word.
 
     NOTE / caveat: this assumes any sentence starting "One,"/"Two,"/etc.
     followed by a comma is a listicle count word, which matches this
@@ -678,6 +684,48 @@ def _normalize_listicle_number_beats(beats: List[dict]) -> None:
         # else: planner explicitly set 'number' on a beat whose text
         # doesn't start a spelled-out count — left alone rather than
         # second-guessed, since that may be an intentional continuation.
+
+        # NEW: force the icon-only listicle rule for real, per direct
+        # feedback — a prompt asking Gemini for "icons" instead of
+        # "items" is a request, not a guarantee, and this beat already
+        # got PAST the "beat.get('icons')" early-continue above, which
+        # means it does NOT have 'icons' yet. For the psychology
+        # channel, every numbered beat's end-state must be icon-only —
+        # so whatever shape it actually arrived in (icon+word 'items',
+        # or a single concept_key/label) gets converted here, dropping
+        # the word label(s) entirely, rather than rendering as icon+word
+        # just because that's what the planner happened to output.
+        if beat.get("channel") == "psychology":
+            items = beat.get("items")
+            concept_key, label = beat.get("concept_key"), beat.get("label")
+            if items:
+                converted = [pair["concept_key"] for pair in items
+                             if pair.get("type") == "icon" and pair.get("concept_key")]
+                if converted:
+                    beat["icons"] = converted[:4]
+                    beat.pop("items", None)
+                    beat.pop("layout", None)  # was for icon+word pairing; meaningless for a pure icon grid
+                    print(f"[render_pipeline] beat_id={beat.get('beat_id')}: numbered listicle beat "
+                          f"arrived as icon+word 'items' — converted to icon-only 'icons' "
+                          f"({len(beat['icons'])} icon(s)), dropping the word label(s), per this "
+                          f"channel's icon-only listicle rule.")
+                else:
+                    print(f"[render_pipeline] beat_id={beat.get('beat_id')}: numbered listicle beat had "
+                          f"'items' with no usable icon concept_key to convert — leaving 'number' set "
+                          f"with nothing to draw.")
+            elif concept_key:
+                beat["icons"] = [concept_key]
+                beat.pop("concept_key", None)
+                beat.pop("label", None)
+                beat.pop("layout", None)
+                print(f"[render_pipeline] beat_id={beat.get('beat_id')}: numbered listicle beat used a "
+                      f"single concept_key/label instead of icons — converted to a one-icon 'icons' "
+                      f"list, dropping the word label, per this channel's icon-only listicle rule.")
+            else:
+                print(f"[render_pipeline] beat_id={beat.get('beat_id')}: looks like a numbered listicle "
+                      f"item but has neither 'items', 'concept_key', nor 'icons' to draw — leaving "
+                      f"'number' set with nothing to draw.")
+            continue
 
         items = beat.get("items")
         if not items:
