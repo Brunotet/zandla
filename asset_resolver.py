@@ -56,6 +56,16 @@ VENDOR_ICON_DIRS = {
     "phosphor": os.path.join(REPO_ROOT, "vendor", "icons", "phosphor"),
     "lucide": os.path.join(REPO_ROOT, "vendor", "icons", "lucide"),
     "iconoir": os.path.join(REPO_ROOT, "vendor", "icons", "iconoir"),
+    "modern": os.path.join(REPO_ROOT, "vendor", "icons", "modern"),
+}
+
+# Per direct request: for this channel specifically, icon search should
+# start in this ONE library first, and only fall back to the fair
+# round-robin across every other library if it has NOTHING — a true
+# cascade, not a blend. Other channels (not listed here) get the
+# unchanged fair round-robin across ALL libraries, "modern" included.
+PRIORITY_LIBRARY_BY_CHANNEL = {
+    "psychology": "modern",
 }
 
 
@@ -308,7 +318,7 @@ def _rasterize_svg(svg_path: str, size: int = 256) -> Optional[bytes]:
         return None
 
 
-def search_vendor_icon_candidates(keyword: str, top_k_by_filename: int = 12) -> list:
+def search_vendor_icon_candidates(keyword: str, top_k_by_filename: int = 12, channel: Optional[str] = None) -> list:
     """Two-stage search: filename match narrows the vendored set down
     to a manageable shortlist (full CLIP-scoring across 20,000+ icons
     per call would be slow and mostly pointless — a filename match is
@@ -320,6 +330,15 @@ def search_vendor_icon_candidates(keyword: str, top_k_by_filename: int = 12) -> 
     no usable <path> data — see svg_to_path.py's documented LIMITATION
     on primitive-only icons). Returns an empty list if nothing in the
     vendored set is even filename-plausible for this keyword.
+
+    `channel`, if given and present in PRIORITY_LIBRARY_BY_CHANNEL,
+    changes the search order per direct request: that channel's
+    priority library is searched FIRST, and its matches are used
+    EXCLUSIVELY if it has ANY — a true cascade ("start there, only
+    fall back to the rest if it has nothing"), not a blend with the
+    other libraries. If the priority library has zero matches, or
+    `channel` isn't in PRIORITY_LIBRARY_BY_CHANNEL, falls through to
+    the fair round-robin across every library exactly as before.
 
     BUG FIXED (confirmed by tracing the loop, not guessed): the
     shortlist cap used to be checked BEFORE moving to the next
@@ -362,20 +381,29 @@ def search_vendor_icon_candidates(keyword: str, top_k_by_filename: int = 12) -> 
     if not per_library_matches:
         return []
 
-    shortlist = []
-    lib_iters = {name: iter(paths) for name, paths in per_library_matches.items()}
-    while len(shortlist) < top_k_by_filename and lib_iters:
-        exhausted = []
-        for name, it in lib_iters.items():
-            try:
-                shortlist.append(next(it))
-            except StopIteration:
-                exhausted.append(name)
-                continue
-            if len(shortlist) >= top_k_by_filename:
-                break
-        for name in exhausted:
-            del lib_iters[name]
+    priority_lib = PRIORITY_LIBRARY_BY_CHANNEL.get(channel)
+    if priority_lib and priority_lib in per_library_matches:
+        # Start in the priority library — use ONLY its matches, capped,
+        # no blending with the other libraries. A true cascade.
+        shortlist = per_library_matches[priority_lib][:top_k_by_filename]
+    else:
+        # Fair round-robin across whatever libraries have a match —
+        # unchanged bug-fixed behavior, whether or not this channel has
+        # a priority library (it just had nothing in it this time).
+        shortlist = []
+        lib_iters = {name: iter(paths) for name, paths in per_library_matches.items()}
+        while len(shortlist) < top_k_by_filename and lib_iters:
+            exhausted = []
+            for name, it in lib_iters.items():
+                try:
+                    shortlist.append(next(it))
+                except StopIteration:
+                    exhausted.append(name)
+                    continue
+                if len(shortlist) >= top_k_by_filename:
+                    break
+            for name in exhausted:
+                del lib_iters[name]
 
     if len(shortlist) == 1:
         return shortlist
@@ -400,12 +428,14 @@ def search_vendor_icon_candidates(keyword: str, top_k_by_filename: int = 12) -> 
     return ranked_paths + failed_to_rasterize
 
 
-def _search_vendor_icons(keyword: str, top_k_by_filename: int = 12) -> Optional[str]:
+def _search_vendor_icons(keyword: str, top_k_by_filename: int = 12, channel: Optional[str] = None) -> Optional[str]:
     """Single-winner API, UNCHANGED behavior for existing callers
     (resolve()'s tier-2 check) — now just a thin wrapper around
     search_vendor_icon_candidates() above, which does the actual work
-    and documents the round-robin library-fairness fix."""
-    candidates = search_vendor_icon_candidates(keyword, top_k_by_filename)
+    and documents the round-robin library-fairness fix. `channel` is
+    threaded straight through to it (see that docstring for the
+    priority-library cascade this enables)."""
+    candidates = search_vendor_icon_candidates(keyword, top_k_by_filename, channel=channel)
     return candidates[0] if candidates else None
 
 
@@ -423,14 +453,18 @@ class ResolvedAsset:
         return {"source": self.source, "kind": self.kind, "draw_style": self.draw_style}
 
 
-def resolve(keyword: str, hint: Optional[str] = None, cache_dir: Optional[str] = None) -> Optional[ResolvedAsset]:
+def resolve(keyword: str, hint: Optional[str] = None, cache_dir: Optional[str] = None,
+            channel: Optional[str] = None) -> Optional[ResolvedAsset]:
     """hint: "icon" | "illustration" | None (search everything, icon
     tier first). Returns None only if every tier failed — caller
     should hard-fail the beat rather than silently skip it, per the
     existing no-silent-fallback rule; this function itself doesn't
-    decide that, it just reports what it found."""
+    decide that, it just reports what it found. `channel`, if given,
+    is threaded through to the vendor icon search — see
+    search_vendor_icon_candidates for the priority-library cascade
+    this enables for specific channels."""
     if hint != "illustration":
-        icon_path = _search_vendor_icons(keyword)
+        icon_path = _search_vendor_icons(keyword, channel=channel)
         if icon_path:
             return ResolvedAsset("icon", "svg_path", icon_path, "stroke_reveal")
 

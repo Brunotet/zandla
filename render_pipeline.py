@@ -160,6 +160,51 @@ def _layout_icon_grid(region: dict, n: int) -> list:
     return boxes
 
 
+def _layout_icon_cluster(region: dict, n: int) -> list:
+    """The "draw-center-then-pop-satellites" icon style, per direct
+    spec — a DIFFERENT arrangement from _layout_icon_grid above, for
+    the SAME 'icons' field (selected via the beat's 'icon_layout'
+    field — see beat_schema.py/the visual planner prompt). Icon 0 is
+    always the CENTER icon (hand-drawn via the normal stroke-reveal —
+    unchanged rendering); every icon after that is a SATELLITE that
+    pops in/out (see animateIconPop in scene_template.html) rather
+    than being stroke-drawn.
+
+    N=3: icon0 center; icon1 upper-left; icon2 upper-right — both
+    satellites sit a bit HIGHER than the center icon and offset
+    sideways (not stacked directly above it), per direct spec ("same
+    level... a bit higher, not entirely above").
+    N=4: same 3 as above, PLUS icon3 directly BELOW the center icon,
+    horizontally aligned with it.
+
+    Only 3 or 4 icons are supported — this style explicitly starts at
+    3 per direct spec; use _layout_icon_grid for 1-2 icons instead.
+
+    Proportions below (0.32 center / 0.28 satellite size, 0.30/0.22
+    offsets) were found by searching a grid of candidates for the
+    LARGEST icons that still produce ZERO overlap between any pair —
+    verified computationally, not eyeballed, for both N=3 and N=4.
+    """
+    if n not in (3, 4):
+        raise ValueError(f"_layout_icon_cluster only supports 3 or 4 icons, got {n}")
+
+    cx = region["x"] + region["w"] / 2
+    cy = region["y"] + region["h"] / 2
+    center_size = min(region["w"], region["h"]) * 0.32
+    satellite_size = min(region["w"], region["h"]) * 0.28
+
+    def _box(center_x, center_y, size):
+        return {"x": center_x - size / 2, "y": center_y - size / 2, "w": size, "h": size}
+
+    boxes = [_box(cx, cy, center_size)]
+    boxes.append(_box(cx - region["w"] * 0.30, cy - region["h"] * 0.22, satellite_size))  # upper-left
+    boxes.append(_box(cx + region["w"] * 0.30, cy - region["h"] * 0.22, satellite_size))  # upper-right
+    if n == 4:
+        boxes.append(_box(cx, cy + region["h"] * 0.31, satellite_size))  # below, aligned with center
+
+    return boxes
+
+
 # How many trailing WORDS of a beat's real narration are held back as
 # pure buffer — no visual is still drawing once the narrator reaches
 # these words, so every beat ends on a clean, fully-drawn frame before
@@ -312,7 +357,7 @@ def resolve_beat_asset(beat: dict, channel: str, illustration_cache_dir: str, as
         resolved = historical_asset_resolver.resolve(concept_key, cache_dir=illustration_cache_dir)
         source_desc = "Wikimedia Commons/LOC/NASA/Internet Archive"
     else:
-        resolved = asset_resolver.resolve(concept_key, cache_dir=illustration_cache_dir)
+        resolved = asset_resolver.resolve(concept_key, cache_dir=illustration_cache_dir, channel=channel)
         source_desc = "icons or any stock source"
     if resolved is None:
         raise RuntimeError(
@@ -335,6 +380,48 @@ def resolve_beat_asset(beat: dict, channel: str, illustration_cache_dir: str, as
     return entry
 
 
+# Channels where "no vendored icon found" should NEVER crash the
+# render — per direct feedback, reversing the earlier "raise" behavior:
+# these channels now fall through to a guaranteed, always-available
+# fallback icon (see _guaranteed_fallback_icon below) instead of a
+# stock photo AND instead of a hard failure. Other channels (if any
+# exist) keep the original graceful stock-image fallback, unaffected.
+NO_STOCK_FALLBACK_CHANNELS = {"psychology"}
+
+
+def _guaranteed_fallback_icon(icon_box: dict, padding_ratio: float = 0.15) -> dict:
+    """A hardcoded, ALWAYS-available last-resort icon (a simple circle
+    outline) — baked directly into this code, not loaded from any
+    vendor file, so it can NEVER fail due to a missing or corrupt file
+    on disk. Used when NO vendored icon (not "modern", not any of the
+    other 3 libraries, no CLIP-ranked candidate) can be resolved for a
+    concept_key on a NO_STOCK_FALLBACK_CHANNELS channel, so a render
+    there never fails outright over one missing icon.
+
+    Uses the exact same viewBox-fit-to-region math as
+    svg_to_path.icon_to_path_d (fit a 24x24 viewBox into icon_box,
+    preserving aspect ratio, centered, padded) — just for a fixed
+    viewBox instead of one parsed from a file, since there is no file.
+    A standard two-arc circle path (well-formed, renders correctly in
+    every browser, and reveals sensibly under stroke-dasharray
+    animation — unlike a single-point-gap circle trick, which can look
+    like an instant flash rather than a real reveal).
+    """
+    vb_w, vb_h = 24.0, 24.0
+    pad_x = icon_box["w"] * padding_ratio
+    pad_y = icon_box["h"] * padding_ratio
+    avail_w = icon_box["w"] - 2 * pad_x
+    avail_h = icon_box["h"] - 2 * pad_y
+    scale = min(avail_w / vb_w, avail_h / vb_h) if vb_w and vb_h else 1.0
+    drawn_w, drawn_h = vb_w * scale, vb_h * scale
+    offset_x = icon_box["x"] + (icon_box["w"] - drawn_w) / 2
+    offset_y = icon_box["y"] + (icon_box["h"] - drawn_h) / 2
+    transform = f"translate({offset_x:.2f}, {offset_y:.2f}) scale({scale:.4f})"
+    subpaths = ["M2 12 A10 10 0 1 0 22 12 A10 10 0 1 0 2 12 Z"]
+    return {"subpaths": subpaths, "transform": transform, "scale": scale,
+            "offset_x": offset_x, "offset_y": offset_y}
+
+
 def resolve_icon_stroke_path(concept_key: str, channel: str, illustration_cache_dir: str,
                               icon_box: dict, beat_id, max_retry_candidates: int = 4):
     """Resolves `concept_key` to real, USABLE stroke-reveal path data —
@@ -353,28 +440,42 @@ def resolve_icon_stroke_path(concept_key: str, channel: str, illustration_cache_
       1. The normal cached/resolved entry from resolve_beat_asset — the
          fast path, unchanged for the common case where it's already a
          working icon. Zero extra cost when nothing is broken.
+         `channel` is threaded through here so channels with a
+         priority library (see asset_resolver.PRIORITY_LIBRARY_BY_CHANNEL)
+         actually get that priority on this first attempt too, not just
+         on retry.
       2. If that entry IS a real icon (draw_style=stroke_reveal) but
          its SVG FAILS to convert, retries against the next-best
-         vendored candidates (asset_resolver.search_vendor_icon_candidates),
-         up to max_retry_candidates total attempts — and if one works,
-         SELF-HEALS the channel's concept-library.json cache so future
-         renders skip straight to the working icon instead of
-         re-discovering this every time.
+         vendored candidates (asset_resolver.search_vendor_icon_candidates,
+         also channel-aware), up to max_retry_candidates total attempts
+         — and if one works, SELF-HEALS the channel's
+         concept-library.json cache so future renders skip straight to
+         the working icon instead of re-discovering this every time.
 
-    Returns (icon_path_info, asset_entry) on success, or (None,
-    asset_entry) if no vendored icon can be made to work at all — this
-    is NOT necessarily a hard failure; it just means "no real icon
-    exists for this concept", and it's the CALLER's job to decide what
-    that means for its context (fall back to a stock image, or raise).
-    `asset_entry` is always returned (even on failure) so the caller
-    can inspect it (e.g. its draw_style/asset_source) without a second
+    On CHANNELS in NO_STOCK_FALLBACK_CHANNELS: if no vendored icon can
+    be made to work at all (neither the first resolution nor any retry
+    candidate), this returns a GUARANTEED fallback icon (see
+    _guaranteed_fallback_icon) instead of raising or substituting a
+    stock photo — per direct feedback, a render on this channel must
+    NEVER fail outright, and must NEVER show a stock photo either.
+
+    On every OTHER channel: returns (icon_path_info, asset_entry) on
+    success, or (None, asset_entry) if no vendored icon works — the
+    CALLER decides what that means (e.g. fall back to a stock image).
+    `asset_entry` is always returned (even on failure, non-psychology
+    channels only) so the caller can inspect it without a second
     resolve_beat_asset call.
     """
     asset_entry = resolve_beat_asset(
         {"concept_key": concept_key, "beat_id": beat_id}, channel, illustration_cache_dir, asset_type="icon",
     )
     if asset_entry.get("draw_style") != "stroke_reveal":
-        return None, asset_entry  # no vendored icon at all for this concept — caller decides fallback
+        if channel in NO_STOCK_FALLBACK_CHANNELS:
+            print(f"[render_pipeline] beat_id={beat_id}: concept_key={concept_key!r} has no vendored "
+                  f"icon match at all — using the guaranteed fallback icon instead of failing (channel "
+                  f"{channel!r} never shows a stock photo either).")
+            return _guaranteed_fallback_icon(icon_box), asset_entry
+        return None, asset_entry  # other channels: caller decides fallback, unchanged
 
     svg_path = asset_entry["asset_ref"].get("path")
     icon_path_info = svg_to_path.icon_to_path_d(svg_path, icon_box, padding_ratio=0.08) if svg_path else None
@@ -385,7 +486,7 @@ def resolve_icon_stroke_path(concept_key: str, channel: str, illustration_cache_
           f"failed to convert (broken SVG or no usable <path> data) — trying the next-best vendored "
           f"candidate(s)")
 
-    candidates = asset_resolver.search_vendor_icon_candidates(concept_key)
+    candidates = asset_resolver.search_vendor_icon_candidates(concept_key, channel=channel)
     tried = {svg_path}
     for candidate_path in candidates:
         if candidate_path in tried:
@@ -407,6 +508,10 @@ def resolve_icon_stroke_path(concept_key: str, channel: str, illustration_cache_
 
     print(f"[render_pipeline] beat_id={beat_id}: concept_key={concept_key!r} — ALL vendored candidates "
           f"tried ({len(tried)}) failed to convert. No usable icon for this concept.")
+    if channel in NO_STOCK_FALLBACK_CHANNELS:
+        print(f"[render_pipeline] beat_id={beat_id}: using the guaranteed fallback icon instead of "
+              f"failing (channel {channel!r} never shows a stock photo either).")
+        return _guaranteed_fallback_icon(icon_box), asset_entry
     return None, asset_entry
 
 
@@ -1059,9 +1164,29 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 "w": region["w"],
                 "h": region["h"] - row_offset * (row_h + row_gap),
             }
-            icon_boxes = _layout_icon_grid(grid_region, n_icons)
+            # "cluster" style — added per direct spec: icon 0 is drawn
+            # center via the normal stroke-reveal hand (unchanged below),
+            # every OTHER icon in the beat pops in/out instead (see
+            # animateIconPop in scene_template.html) rather than being
+            # hand-drawn. Only 3 or 4 icons support this style — see
+            # _layout_icon_cluster's own docstring. Defaults to the
+            # existing left/right "grid" style when 'icon_layout' is
+            # omitted, so every beat that predates this feature is
+            # completely unaffected.
+            icon_layout_style = beat.get("icon_layout", "grid")
+            if icon_layout_style == "cluster":
+                if n_icons not in (3, 4):
+                    raise RuntimeError(
+                        f"beat_id={beat['beat_id']}: icon_layout='cluster' requires exactly 3 or 4 "
+                        f"icons, got {n_icons}. Use 'icons' with 3-4 entries, or drop 'icon_layout' "
+                        f"entirely to use the default left/right grid instead."
+                    )
+                icon_boxes = _layout_icon_cluster(grid_region, n_icons)
+            else:
+                icon_boxes = _layout_icon_grid(grid_region, n_icons)
 
             illustration_items = []
+            popped_icons = []
             for i, concept_key_raw in enumerate(icons):
                 concept_key = (concept_key_raw or "").strip()
                 if not concept_key:
@@ -1085,16 +1210,42 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 # now tries real icon resolution WITH retry-across-ranked-
                 # candidates (see resolve_icon_stroke_path — also fixes the
                 # separate case of a broken/unconvertable SVG file when a
-                # working sibling icon exists), and only if truly NO
-                # vendored icon works does it fall back to a small popping
-                # image in the same grid slot instead of crashing.
+                # working sibling icon exists). On this channel
+                # (NO_STOCK_FALLBACK_CHANNELS), resolve_icon_stroke_path
+                # itself now raises if truly no vendored icon works, so
+                # icon_path_info is never None here in practice for this
+                # channel — the illustration-fallback branch below only
+                # still matters for any OTHER channel using this same code.
                 icon_path_info, item_asset_entry = resolve_icon_stroke_path(
                     concept_key, channel, illustration_cache_dir, icon_boxes[i], f"{beat['beat_id']}-icon{i}",
                 )
                 print(f"[render_pipeline] beat_id={beat['beat_id']} icon{i} concept_key={concept_key!r} "
                       f"-> resolved: source={item_asset_entry.get('asset_source')}")
 
-                if icon_path_info is not None:
+                is_satellite = icon_layout_style == "cluster" and i > 0
+
+                if icon_path_info is not None and is_satellite:
+                    # Cluster satellite: a REAL vendored icon (never a
+                    # stock photo — same resolution/retry as the center
+                    # icon above), but revealed by POPPING in/out (see
+                    # animateIconPop) instead of being hand-drawn.
+                    # pivot_x/y = this icon's own box center, so the pop
+                    # scales around itself, not the region's origin.
+                    stroke_w = max(0.3, min(3.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"]))
+                    box = icon_boxes[i]
+                    popped_icons.append({
+                        "beat_id": f"{beat['beat_id']}-cluster{i}-icon",
+                        "subpaths": icon_path_info["subpaths"],
+                        "stroke_width": stroke_w,
+                        "path_transform": icon_path_info["transform"],
+                        "pivot_x": box["x"] + box["w"] / 2,
+                        "pivot_y": box["y"] + box["h"] / 2,
+                        "start": icon_start_t,
+                        "end": icon_end_t,
+                    })
+                elif icon_path_info is not None:
+                    # Center icon (cluster style) or any icon (grid
+                    # style) — normal hand-drawn stroke reveal, unchanged.
                     icon_group_id = f"icon-{beat['beat_id']}-grid{i}"
                     stroke_w = max(0.3, min(3.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"]))
                     sub_visuals.append({
@@ -1117,6 +1268,9 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                     # small pop-in/out (see _illustration_reveal, applied
                     # pipeline-wide) inside this exact grid slot rather
                     # than failing the whole render over one missing icon.
+                    # Only reachable on a channel NOT in
+                    # NO_STOCK_FALLBACK_CHANNELS — resolve_icon_stroke_path
+                    # raises before returning None on this channel.
                     cached_path = item_asset_entry.get("asset_ref", {}).get("cached_path")
                     if not cached_path:
                         raise RuntimeError(
@@ -1137,6 +1291,8 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             beat_out["sub_visuals"] = sub_visuals
             if illustration_items:
                 beat_out["illustration_items"] = illustration_items
+            if popped_icons:
+                beat_out["popped_icons"] = popped_icons
 
             effective_rows = icon_grid_rows + row_offset
             target_height = (region["h"] / max(1, effective_rows)) * 0.85
