@@ -1,136 +1,277 @@
 """
-Text -> SVG path data, computed in Python via fonttools.
+Text -> a list of real single-stroke pen paths, using Hershey font
+data — the actual industry-standard single-stroke vector font format
+(created 1967 at the US National Bureau of Standards, public domain,
+used for pen plotters/engravers ever since specifically BECAUSE it's
+genuine stroke-skeleton data, not filled letter shapes).
 
-DESIGN DECISION: this runs server-side (during scene-program build),
-NOT in the browser via opentype.js. Two reasons:
-  1. Matches your standing rule — deterministic and cacheable over
-     generative at render time. A path string computed once in Python
-     is a plain value from then on; nothing font-related needs to
-     load, parse, or race against anything else at render time.
-  2. Precise control over sizing/fit BEFORE the camera/region layout
-     is finalized — we need to know how wide the text is to decide
-     the region size and camera framing, which is circular if the
-     browser is the one computing glyph widths.
+WHY THIS REPLACES THE EARLIER fontTools-BASED APPROACH:
+Regular fonts (TTF/OTF, including "handwriting-styled" ones) ALWAYS
+store letters as FILLED 2D outline shapes internally — that's the only
+thing the format can represent, even when the letter is drawn to
+LOOK like a thin pen stroke. Tracing the outline of a filled shape
+with a thick stroke produces a blob; revealing it with a clip-wipe
+produces a flat horizontal slide with no relationship to the letter's
+actual shape — the hand can't trace something that doesn't exist in
+the data. Hershey fonts solve this at the data level: each glyph is
+literally a list of pen strokes (a real skeleton the letter is drawn
+FROM), which is exactly the "hand actually writes each letter, moving
+through the letter's real shape, lifting the pen between strokes"
+effect this pipeline needs. A Hershey "A", for example, is genuinely
+THREE separate pen strokes (two diagonals, one crossbar) — matching
+how a hand actually draws it.
 
-Font: Shadows Into Light (Google Fonts, OFL license — free, unlimited,
-commercial use, no attribution required, vendored locally so there's
-no runtime font-loading dependency at all). Swap FONT_PATH for a
-different handwriting-style font if the aesthetic doesn't fit once
-you see real output — nothing else here depends on which font it is.
+Output shape matches svg_to_path.py's icon output (a list of subpath
+`d` strings) DELIBERATELY — write-mode and draw-mode now use the exact
+same proven stroke-reveal renderer in scene_template.html, not two
+separate techniques. One less thing to keep in sync, one fewer place
+for a bug to hide.
+
+Font data source: techninja/hersheytextjs (MIT wrapper around public-
+domain Hershey vector font data). Vendored locally, no runtime fetch.
 """
+import json
 import os
+import re
 from functools import lru_cache
-from fontTools.ttLib import TTFont
-from fontTools.pens.svgPathPen import SVGPathPen
-from fontTools.pens.transformPen import TransformPen
-from fontTools.misc.transform import Transform
 
-FONT_PATH = os.path.join(os.path.dirname(__file__), "vendor", "fonts", "ShadowsIntoLight.ttf")
+HERSHEY_JSON_PATH = os.path.join(os.path.dirname(__file__), "vendor", "fonts", "hershey-cursive.json")
+
+# This font's own coordinate system spans roughly this Y range
+# (measured directly from the vendored data, not assumed) — used as
+# the reference "em size" for scaling to a target pixel font_size.
+_NATIVE_Y_SPAN = 32.0
+
+
+_COORD_RE = re.compile(r"(-?\d+\.?\d*),(-?\d+\.?\d*)")
+
+
+def _real_max_x(d: str) -> float:
+    """The glyph's declared 'o' (advance width) is NOT reliable on its
+    own — measured directly against this font's data, several letters'
+    actual ink (e.g. 'r', 'm') extends well past their own 'o' value
+    (overhang). Advancing the cursor by 'o' alone under-spaces those
+    letters relative to ones whose ink stays inside their 'o' box,
+    which is what produced the "some letters packed, some letters
+    apart" bug — it wasn't random, it was per-glyph overhang. Real
+    max-x of the stroke coordinates is the actual right edge that must
+    clear before the next letter starts."""
+    xs = [float(m.group(1)) for m in _COORD_RE.finditer(d)]
+    return max(xs) if xs else 0.0
 
 
 @lru_cache(maxsize=1)
 def _load_font():
-    font = TTFont(FONT_PATH)
-    cmap = font.getBestCmap()
-    glyph_set = font.getGlyphSet()
-    hmtx = font["hmtx"]
-    units_per_em = font["head"].unitsPerEm
-    ascent = font["hhea"].ascent
-    return {
-        "cmap": cmap, "glyph_set": glyph_set, "hmtx": hmtx,
-        "units_per_em": units_per_em, "ascent": ascent,
-    }
+    with open(HERSHEY_JSON_PATH) as f:
+        data = json.load(f)
+    chars = data["chars"]
+    for c in chars:
+        # Precomputed once here (not per-occurrence at render time) —
+        # advance = whichever is bigger, the declared width or the
+        # real ink extent, so overhang letters get their true width.
+        c["_advance"] = max(c["o"], _real_max_x(c["d"]))
+    return chars  # list of 95, index = ord(char) - 33
 
 
-def _glyph_name_for_char(cmap: dict, ch: str) -> str:
-    cp = ord(ch)
-    return cmap.get(cp, cmap.get(ord(" "), ".notdef"))
+def _char_data(ch: str, chars: list):
+    idx = ord(ch) - 33
+    if 0 <= idx < len(chars):
+        return chars[idx]
+    return None
+
+
+def _split_subpaths(d: str) -> list:
+    """A single Hershey character's `d` string can itself contain
+    multiple disconnected strokes (multiple M commands) — e.g. 'A' is
+    genuinely 3 separate pen strokes. Splits back into individual
+    'M...' subpath strings so each becomes its own stroke-reveal
+    <path> element (same reasoning as the icon multi-subpath fix)."""
+    parts = re.split(r"(?=M)", d.strip())
+    return [p.strip() for p in parts if p.strip()]
 
 
 def text_advance_width(text: str, font_size: float) -> float:
-    """Total width of `text` at `font_size`, font units converted to
-    px — needed BEFORE path generation to decide how big to render
-    (fit-to-region), avoiding a render/measure/re-render loop."""
-    f = _load_font()
-    scale = font_size / f["units_per_em"]
-    total = 0
+    """Total width of `text` at `font_size` — needed BEFORE stroke
+    generation to decide how big to render (fit-to-region)."""
+    chars = _load_font()
+    scale = font_size / _NATIVE_Y_SPAN
+    total = 0.0
     for ch in text:
         if ch == " ":
-            gname = _glyph_name_for_char(f["cmap"], " ")
+            total += font_size * 0.22
+            continue
+        c = _char_data(ch, chars)
+        advance = c["_advance"] if c else _NATIVE_Y_SPAN * 0.5
+        total += advance * scale + font_size * 0.05
+    return total
+
+
+def _wrap_lines(text: str, font_size: float, max_width: float) -> list:
+    """Greedy word-wrap using the SAME advance-width measurement the
+    renderer actually uses (text_advance_width), so a line that fits
+    here is guaranteed to actually fit on screen at this font_size."""
+    words = text.split(" ")
+    lines = []
+    current = []
+    for w in words:
+        trial = " ".join(current + [w])
+        if not current or text_advance_width(trial, font_size) <= max_width:
+            current.append(w)
         else:
-            gname = _glyph_name_for_char(f["cmap"], ch)
-        try:
-            aw, _ = f["hmtx"][gname]
-        except KeyError:
-            aw = f["units_per_em"] * 0.5
-        total += aw
-    return total * scale
+            lines.append(" ".join(current))
+            current = [w]
+    if current:
+        lines.append(" ".join(current))
+    return lines
+
+
+def fit_font_size_wrapped(text: str, max_width: float, max_height: float,
+                           min_size: float = 20, max_size: float = 160) -> float:
+    """Finds the LARGEST font size where the text — WRAPPED across
+    as many lines as needed — fits inside max_width x max_height.
+    This is what fit_font_size (single-line only) was missing: for a
+    long sentence, that function had no choice but to shrink all the
+    way to its hard floor and then overflow past max_width anyway,
+    since nothing ever wrapped it to a second line. Multi-line means
+    the font can stay much bigger for the same sentence."""
+    line_height_ratio = 1.35
+    size = max_size
+    step = 3
+    while size > min_size:
+        lines = _wrap_lines(text, size, max_width)
+        total_h = len(lines) * size * line_height_ratio
+        if total_h <= max_height:
+            return size
+        size -= step
+    return min_size
+
+
+def text_to_strokes_wrapped(text: str, x: float, y: float, font_size: float, max_width: float) -> dict:
+    """Same return shape as text_to_strokes (subpaths + word_groups),
+    but lays the text out across multiple lines instead of forcing
+    everything onto one — word_groups indices stay contiguous and in
+    reading order across the line break, so render_pipeline.py's
+    per-word Chatterbox timing sync still zips correctly regardless
+    of how many lines the sentence wrapped into."""
+    lines = _wrap_lines(text, font_size, max_width)
+    line_height = font_size * 1.35
+    all_subpaths = []
+    word_groups = []
+    cursor_y = y
+    for line in lines:
+        result = text_to_strokes(line, x=x, y=cursor_y, font_size=font_size)
+        offset = len(all_subpaths)
+        for wg in result["word_groups"]:
+            word_groups.append({
+                "word": wg["word"],
+                "subpath_start": wg["subpath_start"] + offset,
+                "subpath_end": wg["subpath_end"] + offset,
+            })
+        all_subpaths.extend(result["subpaths"])
+        cursor_y += line_height
+    return {"subpaths": all_subpaths, "word_groups": word_groups, "line_count": len(lines)}
 
 
 def fit_font_size(text: str, max_width: float, max_height: float,
-                   min_size: float = 24, max_size: float = 160) -> float:
-    """Binary-search-free direct fit: advance width scales linearly
-    with font size, so we can solve for it in one shot rather than
-    iterating."""
-    f = _load_font()
+                   min_size: float = 14, max_size: float = 160) -> float:
     probe_size = 100.0
     probe_width = text_advance_width(text, probe_size)
     if probe_width <= 0:
         return min_size
     size_for_width = max_width / probe_width * probe_size
-    size_for_height = max_height * 0.7  # leave room so ascenders/descenders don't clip the region
+    size_for_height = max_height * 0.75
     size = min(size_for_width, size_for_height)
     return max(min_size, min(max_size, size))
 
 
-def text_to_path_d(text: str, x: float, y: float, font_size: float) -> dict:
-    """Returns {"d": "<svg path d string>", "width": total_px_width}.
-    (x, y) is the TOP-LEFT of the text's bounding box in world-space —
-    the function handles baseline math internally so callers don't
-    need to think about font ascent/descent.
+def text_to_strokes(text: str, x: float, y: float, font_size: float) -> dict:
+    """Returns {"subpaths": ["d1", "d2", ...], "width": total_px_width,
+    "word_groups": [{"word": str, "subpath_start": int, "subpath_end": int}, ...]}.
 
-    Coordinate flip: font glyph coordinates are y-up (baseline at 0,
-    ascenders positive). SVG screen space is y-down. TransformPen
-    applies scale(s, -s) + translate so the OUTPUT path data is
-    already in final screen coordinates — no transform attribute
-    needed on the <path> element itself, which keeps getTotalLength()/
-    getPointAtLength() (used for the stroke-reveal + hand-tracking
-    animation) working in the same coordinate space as everything else
-    on the board.
+    (x, y) is the TOP-LEFT of the text's bounding box in world-space.
+    subpaths are already translated/scaled into final world-space
+    coordinates — no wrapper transform needed on the <path> elements
+    (matches how text_to_path.py's old glyph paths worked, keeps
+    getTotalLength()/getPointAtLength() in the same coordinate space
+    as everything else).
+
+    word_groups maps each word to a RANGE of subpath indices — this is
+    what render_pipeline.py zips against real Chatterbox per-word
+    timestamps, so multiple strokes within one word share that word's
+    real speech duration proportionally (by individual stroke length),
+    rather than every subpath getting equal time regardless of the
+    word it belongs to.
     """
-    f = _load_font()
-    scale = font_size / f["units_per_em"]
-    baseline_y = y + f["ascent"] * scale  # top of bbox + ascent = baseline position
+    chars = _load_font()
+    scale = font_size / _NATIVE_Y_SPAN
 
-    d_parts = []
+    all_subpaths = []
+    word_groups = []
     cursor_x = x
+    current_word = ""
+    current_word_start_idx = 0
+
+    def _flush_word():
+        if current_word:
+            word_groups.append({
+                "word": current_word,
+                "subpath_start": current_word_start_idx,
+                "subpath_end": len(all_subpaths),
+            })
 
     for ch in text:
-        gname = _glyph_name_for_char(f["cmap"], ch)
-        try:
-            aw, _ = f["hmtx"][gname]
-        except KeyError:
-            aw = f["units_per_em"] * 0.5
+        if ch == " ":
+            _flush_word()
+            current_word = ""
+            cursor_x += font_size * 0.22
+            current_word_start_idx = len(all_subpaths)
+            continue
 
-        if ch != " ":
-            transform = Transform(scale, 0, 0, -scale, cursor_x, baseline_y)
-            svg_pen = SVGPathPen(f["glyph_set"])
-            t_pen = TransformPen(svg_pen, transform)
-            try:
-                f["glyph_set"][gname].draw(t_pen)
-                glyph_d = svg_pen.getCommands()
-                if glyph_d:
-                    d_parts.append(glyph_d)
-            except Exception as e:
-                print(f"[text_to_path] failed to draw glyph for '{ch}': {e}")
+        if not current_word:
+            current_word_start_idx = len(all_subpaths)
+        current_word += ch
 
-        cursor_x += aw * scale
+        c = _char_data(ch, chars)
+        if c is None:
+            cursor_x += font_size * 0.22
+            continue
 
-    return {"d": " ".join(d_parts), "width": cursor_x - x}
+        for raw_sub in _split_subpaths(c["d"]):
+            # Parse "M x,y L x,y x,y ..." command tokens, scale + translate
+            # every coordinate pair directly (this font's Y axis already
+            # points down, same as SVG — no flip needed, unlike TTF glyphs).
+            def _transform_coords(match):
+                px = float(match.group(1))
+                py = float(match.group(2))
+                new_x = cursor_x + px * scale
+                new_y = y + (py - (-3)) * scale  # shift so the font's own min-y sits near the top of the box
+                return f"{new_x:.2f},{new_y:.2f}"
+
+            transformed = re.sub(r"(-?\d+\.?\d*),(-?\d+\.?\d*)", _transform_coords, raw_sub)
+            all_subpaths.append(transformed)
+
+        # Advance by the REAL ink extent (c["_advance"], see
+        # _load_font), not the raw declared "o" — "o" alone let
+        # overhang-heavy letters (r, m, ...) collide into the next
+        # letter while other letters got comparatively too much gap.
+        # Small fixed breathing room on top is now much smaller (0.05
+        # instead of 0.2) since the overhang correction already closes
+        # most of the previous crowding-vs-gap inconsistency; this is
+        # just a touch of visual air, not a fix for spacing itself.
+        cursor_x += c["_advance"] * scale + font_size * 0.05
+
+    _flush_word()
+
+    return {
+        "subpaths": all_subpaths,
+        "width": cursor_x - x,
+        "word_groups": word_groups,
+    }
 
 
 if __name__ == "__main__":
     size = fit_font_size("the brain rewires itself", max_width=800, max_height=200)
-    result = text_to_path_d("the brain rewires itself", x=100, y=100, font_size=size)
-    print(f"font_size={size:.1f}, width={result['width']:.1f}px")
-    print(f"path d (first 200 chars): {result['d'][:200]}...")
+    result = text_to_strokes("the brain rewires itself", x=100, y=100, font_size=size)
+    print(f"font_size={size:.1f}, width={result['width']:.1f}px, {len(result['subpaths'])} subpaths")
+    print(f"word_groups: {result['word_groups']}")
+    print(f"first subpath: {result['subpaths'][0]}")

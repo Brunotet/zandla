@@ -22,9 +22,8 @@ import difflib
 import requests
 from typing import Optional
 
-MODAL_TTS_URL = os.environ.get(
-    "MODAL_TTS_URL",
-    "https://simonmood123--chatterbox-tts-chatterboxservice-tts.modal.run",
+MODAL_TTS_URL = os.environ.get("MODAL_TTS_URL") or (
+    "https://simonmood123--chatterbox-tts-chatterboxservice-tts.modal.run"
 )
 
 _PUNCT_RE = re.compile(r"[^\w']")

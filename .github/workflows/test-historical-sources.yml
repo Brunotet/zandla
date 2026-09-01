@@ -1,0 +1,102 @@
+name: Test Historical Sources
+
+# Standalone smoke test — NOT the render pipeline. Triggered the same
+# way you already trigger render.yml from n8n (workflow_dispatch via
+# GitHub's API, same PAT), but this only calls
+# historical_asset_resolver.py directly against real Commons/LOC/NASA/
+# IA APIs and uploads whatever CLIP picked as a downloadable artifact.
+# No R2 upload, no n8n callback, no video render — nothing here
+# touches render.yml or any other channel's flow at all.
+
+on:
+  workflow_dispatch:
+    inputs:
+      queries:
+        description: >
+          Pipe-separated list of test phrases, e.g.
+          "Amelia Earhart portrait 1928|Nikola Tesla laboratory|Apollo 11 moon landing".
+          Leave blank to use the script's built-in default 4 phrases.
+        required: false
+        type: string
+      presigned_put_url:
+        description: >
+          Presigned R2 PUT URL for the zipped results (from the same
+          SigV4 presign logic your dispatch Code node already uses).
+          If omitted, results only go to the GH Actions artifact.
+        required: false
+        type: string
+      public_url:
+        description: "The public pub-*.r2.dev URL matching presigned_put_url, just echoed into the log for convenience."
+        required: false
+        type: string
+      callback_url:
+        description: "n8n's Wait-node webhook URL — POSTed to when the test finishes, same {status, render_id, video_url, channel} shape resume_n8n.py already uses for real renders."
+        required: false
+        type: string
+
+jobs:
+  test-sources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y ffmpeg
+          pip install -r requirements.txt --break-system-packages
+
+      - name: Run historical source test
+        run: |
+          if [ -n "${{ inputs.queries }}" ]; then
+            IFS='|' read -ra PHRASES <<< "${{ inputs.queries }}"
+            ARGS=()
+            for p in "${PHRASES[@]}"; do ARGS+=(--query "$p"); done
+            python3 tools/test_historical_sources.py "${ARGS[@]}"
+          else
+            python3 tools/test_historical_sources.py
+          fi
+
+      - name: Build slideshow preview video
+        run: |
+          # Each picked image on screen for 2.5s, in one clickable mp4
+          # instead of a zip you have to download+extract. Pad/scale
+          # everything to the same frame so mismatched source image
+          # sizes (Commons vs LOC vs NASA vs IA) don't break concat.
+          # File order = alphabetical by cached filename, which is
+          # NOT necessarily the order the phrases were tested in — the
+          # Actions log from "Run historical source test" above is the
+          # source of truth for which file matches which phrase/source.
+          cd /tmp/historical_test
+          ffmpeg -y -framerate 1/2.5 -pattern_type glob -i '*.jpg' \
+            -vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,format=yuv420p" \
+            -c:v libx264 -r 30 -pix_fmt yuv420p /tmp/historical_test_preview.mp4
+          cd -
+
+      - name: Upload preview video to R2 (presigned PUT)
+        if: ${{ inputs.presigned_put_url != '' }}
+        run: |
+          curl -sS -X PUT --upload-file /tmp/historical_test_preview.mp4 "${{ inputs.presigned_put_url }}"
+          echo "Uploaded — view at: ${{ inputs.public_url }}"
+
+      - name: Callback to n8n Wait node
+        if: ${{ inputs.callback_url != '' }}
+        run: |
+          curl -sS -X POST "${{ inputs.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"status": "ok", "render_id": "historical-test-${{ github.run_id }}", "video_url": "${{ inputs.public_url }}", "channel": "history"}'
+          echo "n8n callback delivered"
+
+      - name: Upload picked images + video as artifact (always, as backup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: historical-test-results
+          path: |
+            /tmp/historical_test/
+            /tmp/historical_test_preview.mp4
+          retention-days: 7

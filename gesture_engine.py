@@ -1,19 +1,25 @@
 """
 Gesture engine.
 
-Turns a beat's `mode` + a resolved world-space target point into a
-concrete hand-placement instruction: which PNG, where to position its
-top-left corner so the CALIBRATED ANCHOR (assets/hands/hand-gestures.json)
-lands exactly on the target, and — for pinch pairs — the two-frame swap
-sequence.
+Turns a beat's `mode` + a target world-space point + a TARGET SIZE into
+a fully-resolved hand placement: exact world-space width/height and
+exact world-space anchor offset, already scaled. This is the
+"bulletproof" version — every number the browser needs is computed
+once, here, in Python. The browser does zero scaling math; it just
+places what it's told. That's what makes this reliable: there is
+exactly one place scale factors get applied, so there's no way for a
+scale-the-hand step and a scale-the-anchor step to drift out of sync
+with each other (that mismatch was the actual root cause of the
+"pen tip way off" bug — the hand was being drawn at its raw native
+pixel size regardless of how small the surrounding text/icon was).
 
-This module does no rendering itself; it hands render_pipeline.py a
-plain dict the Playwright/GSAP template consumes directly.
+Anchors are stored as NORMALIZED FRACTIONS (0-1) in hand-gestures.json
+(anchor_frac), not raw pixels — see that file's _meta for why. This
+module is the ONLY place anchor_frac gets multiplied out to real units.
 """
 import json
 import os
 from dataclasses import dataclass
-from typing import Optional
 
 HANDS_JSON_PATH = os.path.join(os.path.dirname(__file__), "assets", "hands", "hand-gestures.json")
 
@@ -22,118 +28,131 @@ with open(HANDS_JSON_PATH) as f:
 
 GESTURES = {k: v for k, v in _RAW.items() if not k.startswith("_")}
 
+# Default hand sizing — tunable in ONE place. target_height is in
+# world-space units; call sites express their own target relative to
+# something meaningful (font size, region size) rather than a fixed
+# constant, so the hand stays proportionate to whatever it's touching.
+DEFAULT_TARGET_HEIGHT = 220.0
+
 
 @dataclass
-class HandPlacement:
+class ScaledHand:
+    """Fully-resolved hand placement — everything already in final
+    world-space units. Nothing downstream needs to know the native
+    pixel size or do any further scaling."""
     file: str
-    top_left_x: float   # world-space top-left corner for the PNG so its anchor lands on target
-    top_left_y: float
-    native_w: int
-    native_h: int
-    rotation_deg: float = 0.0
+    w: float
+    h: float
+    anchor_x: float
+    anchor_y: float
 
     def to_dict(self):
+        return {"file": self.file, "w": self.w, "h": self.h,
+                "anchor_x": self.anchor_x, "anchor_y": self.anchor_y}
+
+    def placement_at(self, target_x: float, target_y: float, rotation: float = 0.0) -> dict:
+        """For STATIC placements (point, cutaway-adjacent gestures) where
+        the target doesn't move frame-to-frame — pre-computes the
+        top-left corner so the anchor lands exactly on target. Beats
+        with a moving target (write/draw stroke-reveal) use to_dict()
+        instead and let the template compute top-left per frame."""
         return {
-            "file": self.file, "x": self.top_left_x, "y": self.top_left_y,
-            "w": self.native_w, "h": self.native_h, "rotation": self.rotation_deg,
+            "file": self.file, "w": self.w, "h": self.h,
+            "x": target_x - self.anchor_x, "y": target_y - self.anchor_y,
+            "rotation": rotation,
         }
 
 
-def _placement_for_point_gesture(gesture_name: str, target_x: float, target_y: float,
-                                  rotation_deg: float = 0.0) -> HandPlacement:
+def scaled_hand(gesture_name: str, target_height: float = DEFAULT_TARGET_HEIGHT) -> ScaledHand:
+    """The single function everything else should call. Preserves the
+    native aspect ratio, scales anchor_frac by the SAME factor as the
+    image itself — by construction, not a second manual step."""
     g = GESTURES[gesture_name]
-    if g["type"] != "point":
-        raise ValueError(f"gesture '{gesture_name}' is type '{g['type']}', not 'point'")
-    anchor = g["anchor"]
-    w, h = g["native_size"]
-    return HandPlacement(
-        file=g["file"],
-        top_left_x=target_x - anchor["x"],
-        top_left_y=target_y - anchor["y"],
-        native_w=w, native_h=h,
-        rotation_deg=rotation_deg,
-    )
+    native_w, native_h = g["native_size"]
+    scale = target_height / native_h
+    final_w = native_w * scale
+    final_h = target_height
+
+    if "anchor_frac" in g:
+        anchor_x = g["anchor_frac"]["x"] * final_w
+        anchor_y = g["anchor_frac"]["y"] * final_h
+    else:
+        anchor_x = anchor_y = 0.0
+
+    return ScaledHand(file=g["file"], w=final_w, h=final_h, anchor_x=anchor_x, anchor_y=anchor_y)
 
 
-def anchor_offset(gesture_name: str) -> dict:
-    """Raw anchor offset + native size for a 'point'-type gesture,
-    with NO target baked in — used when the target point changes every
-    frame (write/draw stroke-reveal tracking), where render_pipeline.py
-    can't pre-compute a single placement because there isn't a single
-    target, there's a moving one the browser resolves per-frame."""
-    g = GESTURES[gesture_name]
-    if g["type"] != "point":
-        raise ValueError(f"gesture '{gesture_name}' is type '{g['type']}', not 'point'")
-    w, h = g["native_size"]
-    return {"file": g["file"], "anchor_x": g["anchor"]["x"], "anchor_y": g["anchor"]["y"], "w": w, "h": h}
-
-
-def place_write(target_x: float, target_y: float, path_angle_deg: float = 0.0) -> HandPlacement:
-    """target = current point on the stroke-reveal path (see
-    camera/render's getPointAtLength equivalent). path_angle_deg =
-    tangent direction of the path at that point, so the hand leans
-    into the stroke direction rather than staying axis-aligned."""
-    return _placement_for_point_gesture("write", target_x, target_y, rotation_deg=path_angle_deg)
-
-
-def place_point(target_x: float, target_y: float) -> HandPlacement:
-    return _placement_for_point_gesture("point", target_x, target_y)
-
-
-def place_drag(target_x: float, target_y: float) -> HandPlacement:
-    return _placement_for_point_gesture("drag", target_x, target_y)
-
-
-def zoom_swap_pair(target_x: float, target_y: float, direction: str = "in"):
-    """Returns (start_placement, end_placement) for the 2-frame pinch
-    swap. direction='in' => pinch_in (fingers closed) -> pinch_out
-    (fingers spread), selling an enlarge. direction='out' => reverse."""
+def zoom_swap_pair(direction: str = "in", target_height: float = DEFAULT_TARGET_HEIGHT):
+    """Returns (start_hand, end_hand) for the 2-frame pinch swap, both
+    pre-scaled to the same target_height so the swap doesn't also
+    change apparent hand size mid-motion."""
     if direction == "in":
         start_name, end_name = "pinch_in", "pinch_out"
     elif direction == "out":
         start_name, end_name = "pinch_out", "pinch_in"
     else:
         raise ValueError("direction must be 'in' or 'out'")
-    return (
-        _placement_for_point_gesture(start_name, target_x, target_y),
-        _placement_for_point_gesture(end_name, target_x, target_y),
-    )
+    return scaled_hand(start_name, target_height), scaled_hand(end_name, target_height)
 
 
-def place_erase(region_center_x: float, region_center_y: float) -> dict:
+def scaled_erase_zone(target_height: float = DEFAULT_TARGET_HEIGHT) -> dict:
     g = GESTURES["erase"]
-    if g["type"] != "area":
-        raise ValueError("erase gesture must be type 'area'")
-    zone = g["zone"]
-    zone_cx = zone["x"] + zone["w"] / 2
-    zone_cy = zone["y"] + zone["h"] / 2
-    w, h = g["native_size"]
+    native_w, native_h = g["native_size"]
+    scale = target_height / native_h
+    final_w = native_w * scale
+    zf = g["zone_frac"]
     return {
         "file": g["file"],
-        "x": region_center_x - zone_cx,
-        "y": region_center_y - zone_cy,
-        "w": w, "h": h,
-        "sweep": True,
+        "w": final_w, "h": target_height,
+        "zone_cx": (zf["x"] + zf["w"] / 2) * final_w,
+        "zone_cy": (zf["y"] + zf["h"] / 2) * target_height,
     }
 
 
-def place_swipe(direction: str, frame_width: float, frame_height: float, y_center: float) -> dict:
-    """Full-canvas clear. direction: 'ltr' or 'rtl'. Returns start/end
-    x offsets for a sweep tween across the whole visible frame width;
-    'rtl' mirrors the sprite (handled by the render template, not here
-    — this just flags the intent)."""
+def scaled_swipe(direction: str, frame_width: float, target_height: float = DEFAULT_TARGET_HEIGHT,
+                  frame_height: float = None, travel_fraction: float = 1.0) -> dict:
+    """Full-canvas clear or camera-transition sweep.
+    direction: 'ltr'/'rtl' (horizontal) or 'ttb'/'btt' (vertical —
+    requires frame_height, used when the camera pans between rows
+    rather than between columns).
+    travel_fraction: how much of the frame the hand actually crosses,
+    1.0 = full edge-to-edge (the full-board 'swipe' clear gesture
+    needs this — it's meant to wipe the whole board). A smaller value
+    keeps the travel centered and short — just enough to read as a
+    hand passing through, not a full traversal — for the between-
+    sentence camera-transition sweep, which doesn't need to leave the
+    frame at all."""
     g = GESTURES["swipe"]
-    w, h = g["native_size"]
-    anchor = g["anchor"]
-    if direction == "ltr":
-        start_x, end_x = -w, frame_width
-    else:
-        start_x, end_x = frame_width, -w
+    native_w, native_h = g["native_size"]
+    scale = target_height / native_h
+    final_w = native_w * scale
+    af = g["anchor_frac"]
+
+    if direction in ("ltr", "rtl"):
+        anchor_y = af["y"] * target_height
+        full_start, full_end = -final_w, frame_width
+        center = frame_width / 2
+        half_travel = (full_end - full_start) * travel_fraction / 2
+        a, b = center - half_travel, center + half_travel
+        start_x, end_x = (a, b) if direction == "ltr" else (b, a)
+        return {
+            "file": g["file"], "mirror": direction == "rtl", "axis": "x",
+            "start_x": start_x, "end_x": end_x,
+            "w": final_w, "h": target_height, "anchor_y": anchor_y,
+        }
+
+    if frame_height is None:
+        raise ValueError("scaled_swipe: frame_height is required for vertical directions ('ttb'/'btt')")
+    anchor_x = af.get("x", 0.5) * final_w
+    full_start, full_end = -target_height, frame_height
+    center = frame_height / 2
+    half_travel = (full_end - full_start) * travel_fraction / 2
+    a, b = center - half_travel, center + half_travel
+    start_y, end_y = (b, a) if direction == "btt" else (a, b)
     return {
-        "file": g["file"], "mirror": direction == "rtl",
-        "start_x": start_x, "end_x": end_x,
-        "y": y_center - anchor["y"],
-        "w": w, "h": h,
+        "file": g["file"], "mirror": False, "axis": "y",
+        "start_y": start_y, "end_y": end_y,
+        "w": final_w, "h": target_height, "anchor_x": anchor_x,
     }
 
 

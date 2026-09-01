@@ -1,0 +1,66 @@
+name: Scout History Story
+
+# Round-trip 1 of 2 for the history channel. n8n dispatches this,
+# waits (Wait node, same pattern as your render dispatch), this picks
+# a subject + pulls real Wikipedia facts + verifies image coverage,
+# then calls back to n8n's Wait-node webhook with the result. n8n then
+# runs Script -> Visual Planner -> Builder -> dispatches render.yml
+# (round-trip 2) same as your existing channels.
+
+on:
+  workflow_dispatch:
+    inputs:
+      already_used:
+        description: >
+          Pipe-separated list of subjects already covered, e.g.
+          "Amelia Earhart|H.H. Holmes" — pull this from your Google
+          Sheets history the same way the psychology Guard node
+          compiles compiledTopics.
+        required: false
+        type: string
+      callback_url:
+        description: "n8n's Wait-node webhook URL — POSTed to with the scouted story."
+        required: false
+        type: string
+
+jobs:
+  scout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt --break-system-packages
+
+      - name: Run scout
+        id: scout
+        run: |
+          python3 tools/scout_history.py \
+            --already-used "${{ inputs.already_used }}" \
+            --output /tmp/scout_result.json
+        continue-on-error: true  # a "not found" result is still a valid callback, not a workflow failure
+
+      - name: Callback to n8n with result
+        if: ${{ inputs.callback_url != '' }}
+        run: |
+          python3 -c "
+          import json, requests
+          with open('/tmp/scout_result.json') as f:
+              result = json.load(f)
+          resp = requests.post('${{ inputs.callback_url }}', json=result, timeout=30)
+          print(f'n8n callback delivered (HTTP {resp.status_code})')
+          resp.raise_for_status()
+          "
+
+      - name: Upload scout result as artifact (backup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: scout-result
+          path: /tmp/scout_result.json
+          retention-days: 7

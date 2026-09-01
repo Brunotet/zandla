@@ -18,13 +18,18 @@ import json
 import os
 from typing import Optional
 
-VALID_MODES = {"write", "draw", "point", "zoom_in", "zoom_out", "drag", "erase", "swipe", "talk"}
+# "point" and "zoom_in"/"zoom_out" REMOVED per direct feedback — none
+# of these gestures (pointing finger, pinch-zoom icon enlarge, or the
+# plain camera-only zoom_in/zoom_out that replaced it) are wanted
+# anymore. The only camera behavior beats drive now is the automatic
+# reframe every draw/write/icon_word beat already gets via
+# render_pipeline.py's own _apply_camera_move call — nothing a beat's
+# own "mode" field needs to ask for separately.
+VALID_MODES = {"write", "draw", "icon_word", "drag", "erase", "swipe", "talk"}
 GESTURE_FOR_MODE = {
     "write": "write",
     "draw": "write",       # draw mode still uses the write/pen gesture, just targets an icon instead of text
-    "point": "point",
-    "zoom_in": "pinch_in",   # resolves to the pinch_in -> pinch_out swap pair
-    "zoom_out": "pinch_out",  # resolves to the pinch_out -> pinch_in swap pair
+    "icon_word": "write",  # icon + short label, same pen gesture as draw/write
     "drag": "drag",
     "erase": "erase",
     "swipe": "swipe",
@@ -48,10 +53,116 @@ def validate_beat(beat: dict, index: int) -> None:
             f"must be one of {sorted(VALID_MODES)}"
         )
 
-    if beat["mode"] in ("draw", "point", "zoom_in", "zoom_out", "drag") and "concept_key" not in beat:
+    has_items = beat["mode"] == "icon_word" and bool(beat.get("items"))
+    # NEW: pure icon-only listicle items (no word labels), added per
+    # direct feedback — PSYCHOLOGY CHANNEL ONLY (enforced in
+    # render_pipeline.py, not here — this file has no notion of
+    # "channel-specific", so the real gate lives where channel is
+    # actually known). Mutually exclusive with 'items': a beat is
+    # either icon,word pairs OR pure icons, never both.
+    has_icons = beat["mode"] == "icon_word" and bool(beat.get("icons"))
+
+    if has_items and has_icons:
+        raise BeatValidationError(
+            f"beat[{index}] (id={beat['beat_id']}) has BOTH 'items' and 'icons' — use one or the "
+            f"other, not both."
+        )
+
+    if beat["mode"] in ("draw", "drag") and "concept_key" not in beat:
         raise BeatValidationError(
             f"beat[{index}] (id={beat['beat_id']}) mode='{beat['mode']}' requires a concept_key"
         )
+
+    if beat["mode"] == "icon_word" and not has_items and not has_icons:
+        if "concept_key" not in beat:
+            raise BeatValidationError(
+                f"beat[{index}] (id={beat['beat_id']}) mode='icon_word' requires a concept_key "
+                f"(or an 'items' list of 2-4 icons/words, or an 'icons' list of 1-4 pure concept_keys)"
+            )
+        if not str(beat.get("label", "")).strip():
+            raise BeatValidationError(
+                f"beat[{index}] (id={beat['beat_id']}) mode='icon_word' requires a non-empty 'label' "
+                f"(the short word/phrase written beside the icon, e.g. concept_key='food', label='good')"
+            )
+
+    if beat["mode"] == "icon_word":
+        # NEW, optional: "layout" picks how icon(s) and word(s) share
+        # their space — "side_by_side" (default, icon left / word right)
+        # or "stacked" (icon centered, word centered directly below it).
+        # Applies to BOTH the single concept_key/label form AND the
+        # multi-row "items" form (where it applies uniformly to every
+        # row). Omit entirely for the default; only checked when
+        # present, so every existing beat (which never sets this) is
+        # unaffected.
+        layout = beat.get("layout")
+        if layout is not None and layout not in ("side_by_side", "stacked"):
+            raise BeatValidationError(
+                f"beat[{index}] (id={beat['beat_id']}) mode='icon_word' has invalid 'layout' "
+                f"{layout!r} — must be 'side_by_side' or 'stacked' (omit entirely for the default side_by_side)"
+            )
+
+    if has_items:
+        items = beat["items"]
+        if not isinstance(items, list) or len(items) < 2 or len(items) > 6 or len(items) % 2 != 0:
+            raise BeatValidationError(
+                f"beat[{index}] (id={beat['beat_id']}) mode='icon_word' with 'items' needs an EVEN "
+                f"number of entries (2, 4, or 6) forming icon,word pairs — got {items!r}"
+            )
+        for pair_idx in range(0, len(items), 2):
+            icon_item, word_item = items[pair_idx], items[pair_idx + 1]
+            icon_type = icon_item.get("type", "icon")
+            word_type = word_item.get("type")
+            if icon_type != "icon" or word_type != "word":
+                raise BeatValidationError(
+                    f"beat[{index}] (id={beat['beat_id']}) items[{pair_idx}]/items[{pair_idx+1}] must be "
+                    f"an icon,word pair in that exact order (icon first, word second) — got types "
+                    f"{icon_type!r}, {word_type!r}. Patterns like icon-word-word, word-word-icon, or "
+                    f"word-icon-word are not valid — every pair is icon,word, forming one row."
+                )
+            if not str(icon_item.get("concept_key", "")).strip():
+                raise BeatValidationError(
+                    f"beat[{index}] (id={beat['beat_id']}) items[{pair_idx}] (icon) requires a concept_key"
+                )
+            if not str(word_item.get("label", "")).strip():
+                raise BeatValidationError(
+                    f"beat[{index}] (id={beat['beat_id']}) items[{pair_idx+1}] (word) requires a non-empty label"
+                )
+
+    if has_icons:
+        icons = beat["icons"]
+        if not isinstance(icons, list) or not (1 <= len(icons) <= 4):
+            raise BeatValidationError(
+                f"beat[{index}] (id={beat['beat_id']}) 'icons' must be a list of 1-4 concept_keys "
+                f"(pure icons, no word labels) — got {icons!r}"
+            )
+        for i, ck in enumerate(icons):
+            if not str(ck or "").strip():
+                raise BeatValidationError(
+                    f"beat[{index}] (id={beat['beat_id']}) icons[{i}] is empty"
+                )
+
+    # NEW, optional: "number" draws a big standalone digit (1, 2, 3...)
+    # in its own row ABOVE the items rows — for a numbered listicle
+    # sentence ("One, you...", "Two, you..."), this puts an actual "1"/
+    # "2" on screen synced to when the narrator says that number word,
+    # with the sentence's real content still drawn as normal icon/word
+    # rows below it. Only meaningful (and only rendered) on an
+    # icon_word beat WITH items — a bare digit with nothing else on
+    # screen isn't useful, so setting it anywhere else is a planner
+    # mistake, surfaced loudly rather than silently ignored.
+    if "number" in beat and beat["number"] is not None:
+        if not has_items and not has_icons:
+            raise BeatValidationError(
+                f"beat[{index}] (id={beat['beat_id']}) sets 'number' but mode='icon_word' has neither "
+                f"'items' nor 'icons' — 'number' only makes sense alongside content to draw above (the "
+                f"number draws in its own row above whichever content rows/grid the beat has). Add "
+                f"'items' or 'icons', or drop 'number' for this beat."
+            )
+        if not isinstance(beat["number"], int) or isinstance(beat["number"], bool) or beat["number"] < 1:
+            raise BeatValidationError(
+                f"beat[{index}] (id={beat['beat_id']}) 'number' must be a positive integer (1, 2, 3, ...) — "
+                f"got {beat['number']!r}"
+            )
 
     if not beat["text"].strip():
         raise BeatValidationError(f"beat[{index}] (id={beat['beat_id']}) has empty text")
@@ -72,6 +183,19 @@ def validate_beats_against_vocabulary(beats: list, vocabulary: set) -> None:
                 f"beat[{i}] (id={beat['beat_id']}) references unknown concept_key '{ck}' "
                 f"— not present in any concept-library.json. Add it before rendering."
             )
+        for item_idx, item in enumerate(beat.get("items") or []):
+            item_ck = item.get("concept_key")
+            if item_ck and item_ck not in vocabulary:
+                raise BeatValidationError(
+                    f"beat[{i}] (id={beat['beat_id']}) items[{item_idx}] references unknown concept_key "
+                    f"'{item_ck}' — not present in any concept-library.json. Add it before rendering."
+                )
+        for icon_idx, ck in enumerate(beat.get("icons") or []):
+            if ck and ck not in vocabulary:
+                raise BeatValidationError(
+                    f"beat[{i}] (id={beat['beat_id']}) icons[{icon_idx}] references unknown concept_key "
+                    f"'{ck}' — not present in any concept-library.json. Add it before rendering."
+                )
 
 
 def validate_batch(beats: list, vocabulary: Optional[set] = None) -> None:

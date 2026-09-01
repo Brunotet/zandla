@@ -176,7 +176,7 @@ def _mux_audio_with_sfx(video_path: str, narration_path: str, sound_cues: list, 
         input_idx = i + 2  # 0=video, 1=narration, 2.. = sfx clips in order
         delay_ms = int(cue["start"] * 1000)
         label = f"[sfx{i}]"
-        # Volume bumped up again (2 -> 2.6) per direct request. NOTE:
+        # Volume bumped up again (0.85 -> 2) per direct request. NOTE:
         # values above 1.0 amplify beyond the clip's original recorded
         # level, not just "louder relative to narration" — ffmpeg's
         # volume filter doesn't limit/compress, so if a cue's source
@@ -188,7 +188,7 @@ def _mux_audio_with_sfx(video_path: str, narration_path: str, sound_cues: list, 
         # happening — back this number off (e.g. 1.4-1.6) rather than
         # pushing it higher.
         trim = f"atrim=0:{cue['duration']:.3f}," if cue.get("duration") else ""
-        filter_parts.append(f"[{input_idx}:a]{trim}adelay={delay_ms}|{delay_ms},volume=2.6{label}")
+        filter_parts.append(f"[{input_idx}:a]{trim}adelay={delay_ms}|{delay_ms},volume=2{label}")
         mix_labels.append(label)
 
     mix_inputs = "".join(mix_labels)
