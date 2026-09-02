@@ -33,12 +33,36 @@ VIDEO_CRF = "18"        # x264 CRF: lower = higher quality + bigger file. libx26
 VIDEO_PRESET = "slow"   # better compression efficiency at the SAME CRF than the
                          # default "medium" — the cost is longer encode time, an
                          # easy trade to make running in CI rather than interactively.
-OUTPUT_FPS = "30"       # forces a CONSISTENT output frame rate regardless of any
-                         # minor timing variance in Playwright's own screen-capture
-                         # (which isn't guaranteed constant-fps) — this is what
-                         # actually addresses perceived motion "smoothness",
-                         # separate from per-frame crispness (CRF/preset above).
+OUTPUT_FPS = "60"       # Raised from 30 per direct feedback ("hand/camera movement
+                         # has started being a bit choppy"). This forces a CONSISTENT
+                         # output frame rate regardless of any minor timing variance in
+                         # Playwright's own screen-capture (which isn't guaranteed
+                         # constant-fps) — this is what actually addresses perceived
+                         # motion "smoothness", separate from per-frame crispness
+                         # (CRF/preset above). HONEST CAVEAT, not silently decided for
+                         # you: this retimes/duplicates whatever Playwright actually
+                         # captured — it cannot invent motion information Playwright's
+                         # own capture didn't record. If the source capture itself is
+                         # genuinely variable-frame-rate (a real possibility with
+                         # screen-recording vs. a true frame-by-frame PNG dump — see
+                         # this file's own top-of-file TBD note), raising this number
+                         # helps but may not fully resolve choppiness on its own; the
+                         # structural fix at that point would be switching to the
+                         # frame-dump approach the docstring above already flags as a
+                         # future option, which is a bigger architecture change than
+                         # this one-line knob and shouldn't be done without asking first.
 AUDIO_BITRATE = "192k"  # up from ffmpeg's own aac default (~128k).
+
+# Per-file sfx volume — added because a single flat volume for every
+# cue (the old behavior) meant bumping one sound's loudness (click.mp3,
+# requested at 3.5) would have also blasted drawing/wrighting/woosh
+# up to the same level, which was never asked for. SFX_VOLUME_DEFAULT
+# preserves the exact previous behavior (2) for every file NOT listed
+# here, so drawing.mp3/wrighting.mp3/woosh.mp3 are completely unchanged.
+SFX_VOLUME_DEFAULT = 2
+SFX_VOLUME_BY_FILE = {
+    "click.mp3": 3.5,
+}
 
 
 def main():
@@ -135,7 +159,7 @@ SOUNDEFFECT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
 
 
 def _mux_audio_with_sfx(video_path: str, narration_path: str, sound_cues: list, out_path: str):
-    """Mixes drawing/writing/woosh sound-effect cues (from
+    """Mixes drawing/writing/woosh/click sound-effect cues (from
     render_pipeline.py's sound_cues, each an absolute-time cue) into
     the narration track, muxed with the video. NEVER the reason a
     render fails — falls back to the plain, already-proven _mux_audio
@@ -159,6 +183,7 @@ def _mux_audio_with_sfx(video_path: str, narration_path: str, sound_cues: list, 
                 # exactly when the drawing/writing/camera-move stops, instead
                 # of playing the whole file through regardless.
                 "duration": cue.get("duration"),
+                "file": cue["file"],
             })
         else:
             print(f"[run_render] sound cue file not found, skipping: {sfx_path}")
@@ -176,19 +201,21 @@ def _mux_audio_with_sfx(video_path: str, narration_path: str, sound_cues: list, 
         input_idx = i + 2  # 0=video, 1=narration, 2.. = sfx clips in order
         delay_ms = int(cue["start"] * 1000)
         label = f"[sfx{i}]"
-        # Volume bumped up again (0.85 -> 2) per direct request. NOTE:
-        # values above 1.0 amplify beyond the clip's original recorded
-        # level, not just "louder relative to narration" — ffmpeg's
-        # volume filter doesn't limit/compress, so if a cue's source
-        # audio already has hot peaks, doubling it can clip/distort on
-        # those peaks specifically. Narration itself is untouched
-        # (still full level via normalize=0), so this only affects the
-        # drawing/writing/woosh sfx layer. If it sounds harsh/crackly
-        # on a real render rather than just "loud", that's what's
-        # happening — back this number off (e.g. 1.4-1.6) rather than
+        # Per-file volume (see SFX_VOLUME_BY_FILE above) — click.mp3 at
+        # 3.5, every other cue file unchanged at the original flat 2.
+        # NOTE (unchanged from before): values above 1.0 amplify beyond
+        # the clip's original recorded level, not just "louder relative
+        # to narration" — ffmpeg's volume filter doesn't limit/compress,
+        # so if a cue's source audio already has hot peaks, amplifying
+        # it can clip/distort on those peaks specifically. Narration
+        # itself is untouched (still full level via normalize=0), so
+        # this only ever affects the sfx layer. If click.mp3 sounds
+        # harsh/crackly on a real render rather than just "loud", back
+        # SFX_VOLUME_BY_FILE["click.mp3"] off (e.g. 2.5-3.0) rather than
         # pushing it higher.
+        vol = SFX_VOLUME_BY_FILE.get(cue["file"], SFX_VOLUME_DEFAULT)
         trim = f"atrim=0:{cue['duration']:.3f}," if cue.get("duration") else ""
-        filter_parts.append(f"[{input_idx}:a]{trim}adelay={delay_ms}|{delay_ms},volume=2{label}")
+        filter_parts.append(f"[{input_idx}:a]{trim}adelay={delay_ms}|{delay_ms},volume={vol}{label}")
         mix_labels.append(label)
 
     mix_inputs = "".join(mix_labels)

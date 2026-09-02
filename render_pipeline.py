@@ -51,6 +51,49 @@ ICON_ENLARGE_SCALE = 1.25  # NO LONGER USED — the zoom_in/zoom_out icon-enlarg
 ICON_STROKE_TARGET_PX = 6.0  # numerator for scale-compensated stroke width (stroke_width =
                               # this / icon_path_info["scale"]) so the FINAL on-screen width
                               # lands near this many pixels regardless of the icon's fit-scale.
+ICON_STROKE_FINAL_MIN_PX = 3.0  # CONFIRMED PRODUCTION BUG: the old clamp on the DURING-reveal
+                                 # local width (0.3 to 3.0) was fine on its own, but the FINAL
+                                 # on-screen width (what you actually see once the reveal
+                                 # finishes and vector-effect:non-scaling-stroke takes over —
+                                 # or, for cluster satellites, the ONLY width they ever have,
+                                 # since they never get that swap) is that local width
+                                 # multiplied by the icon's fit-scale. For an icon whose native
+                                 # SVG coordinate system needs a lot of shrinking to fit its box
+                                 # (a small "scale" — this is exactly what several `modern`
+                                 # folder icons hit, since that set's native viewBox sizing
+                                 # differs from the other 3 libraries), the DURING width gets
+                                 # clamped to its max (3.0) but the FINAL width still ends up
+                                 # tiny — "drawn thick, then fades to almost nothing the moment
+                                 # it finishes" (or, for satellites, just permanently thin).
+                                 # This is the absolute floor on that FINAL width, in world
+                                 # units, so an icon's outline can never fade below a visible
+                                 # thickness no matter how small its fit-scale is. Raise this
+                                 # single number if icons still look too thin; lower it if a
+                                 # heavily-shrunk icon starts looking chunky/blobby.
+
+
+def _icon_stroke_widths(scale: float) -> tuple:
+    """Single source of truth for icon stroke widths, used by every
+    icon-drawing code path (pure icons grid/cluster, multi-row items,
+    single icon_word, plain draw). Returns (during_reveal_width,
+    final_width):
+      - during_reveal_width: the LOCAL width used WHILE the dasharray
+        stroke-reveal animation is running (see the "THICKNESS" notes
+        elsewhere in this file for why this can't just be the final
+        width during the reveal itself) — unchanged 0.3-3.0 clamp.
+      - final_width: the width actually shown once fully drawn — for
+        normal-scale icons this is the same math as before
+        (during_reveal_width * scale); for a pathologically small
+        scale it's floored at ICON_STROKE_FINAL_MIN_PX so the icon can
+        never fade to near-invisible. Cluster satellite icons (which
+        never switch to non-scaling-stroke) should divide this by
+        `scale` and use THAT as their one-and-only local stroke_width,
+        since their local width IS their final visual width once the
+        icon's own fit-scale transform is applied.
+    """
+    during = max(0.3, min(3.0, ICON_STROKE_TARGET_PX / scale))
+    final = max(ICON_STROKE_FINAL_MIN_PX, during * scale)
+    return during, final
 ROW_CONTENT_H = 230  # compact, FIXED row height for multi-row icon_word "items" — NOT
                       # stretched to fill the (intentionally oversized, for bleed-prevention)
                       # allocated region. That stretch was the actual root cause of "rows too
@@ -479,6 +522,22 @@ def resolve_icon_stroke_path(concept_key: str, channel: str, illustration_cache_
 
     svg_path = asset_entry["asset_ref"].get("path")
     icon_path_info = svg_to_path.icon_to_path_d(svg_path, icon_box, padding_ratio=0.08) if svg_path else None
+    # CONFIRMED PRODUCTION BUG: a concept_key ("smartphone") resolved
+    # successfully to a real vendored SVG (logged as source=icon), yet
+    # rendered as a totally blank slot with no fallback at all. Root
+    # cause: icon_to_path_d can come back NOT None but with an EMPTY
+    # "subpaths" list (e.g. an SVG built from <rect>/<circle>/<ellipse>
+    # primitives rather than <path> data — see svg_to_path.py's own
+    # documented LIMITATION on primitive-only icons) — and the old
+    # check here (`is not None`) treated that as success, so nothing
+    # ever triggered the retry-candidate / guaranteed-fallback logic
+    # below. Same "at least one real subpath" check is applied to every
+    # retry candidate further down, for the same reason.
+    if icon_path_info is not None and not icon_path_info.get("subpaths"):
+        print(f"[render_pipeline] beat_id={beat_id}: icon at {svg_path!r} for concept_key={concept_key!r} "
+              f"converted but produced ZERO usable subpaths (primitive-only SVG?) — treating as a failed "
+              f"conversion, same as a broken SVG.")
+        icon_path_info = None
     if icon_path_info is not None:
         return icon_path_info, asset_entry  # fast path: the cached/first icon just works
 
@@ -493,6 +552,8 @@ def resolve_icon_stroke_path(concept_key: str, channel: str, illustration_cache_
             continue
         tried.add(candidate_path)
         candidate_info = svg_to_path.icon_to_path_d(candidate_path, icon_box, padding_ratio=0.08)
+        if candidate_info is not None and not candidate_info.get("subpaths"):
+            candidate_info = None  # same empty-subpaths guard as the fast path above
         if candidate_info is not None:
             print(f"[render_pipeline] beat_id={beat_id}: concept_key={concept_key!r} recovered using "
                   f"fallback icon {candidate_path!r} (attempt {len(tried)})")
@@ -1058,9 +1119,18 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             # does) fixes this for good: a floor so long sentences still
             # get a visibly-sized hand, a ceiling so short sentences with
             # a large font_size don't produce an absurdly oversized one.
+            # Raised per direct feedback ("hands are too small") — floor,
+            # multiplier, and ceiling all bumped up. This is safe to do
+            # freely: gesture_engine.scaled_hand() scales anchor_frac by
+            # the exact same factor as the image itself, so the pen tip
+            # cannot drift off-target no matter how large target_height
+            # gets — that guarantee is the whole point of that module's
+            # design (see its own docstring). Ceiling raised to 0.95 to
+            # match the already-proven-safe ceiling used by icon-mode
+            # hands below, not an arbitrary new number.
             target_height = max(
-                region["h"] * 0.40,
-                min(font_size * 4.6, region["h"] * 0.85),
+                region["h"] * 0.48,
+                min(font_size * 5.2, region["h"] * 0.95),
             )
             beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
@@ -1231,7 +1301,16 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                     # animateIconPop) instead of being hand-drawn.
                     # pivot_x/y = this icon's own box center, so the pop
                     # scales around itself, not the region's origin.
-                    stroke_w = max(0.3, min(3.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"]))
+                    _during, _final = _icon_stroke_widths(icon_path_info["scale"])
+                    # Satellites NEVER switch to non-scaling-stroke (see
+                    # animateIconPop in scene_template.html — they pop in
+                    # fully-drawn, no reveal-then-swap step), so their one
+                    # local stroke_width IS their permanent visual width
+                    # once the icon's own baked-in fit-scale transform is
+                    # applied — dividing the guaranteed FINAL width by
+                    # scale here is what makes that guarantee hold for
+                    # satellites too, not just hand-drawn icons.
+                    stroke_w = _final / icon_path_info["scale"]
                     box = icon_boxes[i]
                     popped_icons.append({
                         "beat_id": f"{beat['beat_id']}-cluster{i}-icon",
@@ -1243,16 +1322,23 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                         "start": icon_start_t,
                         "end": icon_end_t,
                     })
+                    # Click sound exactly when this satellite pops in —
+                    # per direct request, every icon POP (as opposed to a
+                    # hand-drawn reveal) gets this cue. duration is a
+                    # short, fixed length since this is a one-shot sound
+                    # effect, not something that needs to track the pop's
+                    # own animation length.
+                    sound_cues.append({"file": "click.mp3", "start": icon_start_t, "duration": 0.4})
                 elif icon_path_info is not None:
                     # Center icon (cluster style) or any icon (grid
                     # style) — normal hand-drawn stroke reveal, unchanged.
                     icon_group_id = f"icon-{beat['beat_id']}-grid{i}"
-                    stroke_w = max(0.3, min(3.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"]))
+                    _during, _final = _icon_stroke_widths(icon_path_info["scale"])
                     sub_visuals.append({
                         "beat_id": f"{beat['beat_id']}-grid{i}-icon",
                         "subpaths": icon_path_info["subpaths"],
-                        "stroke_width": stroke_w,
-                        "stroke_width_final": stroke_w * icon_path_info["scale"],
+                        "stroke_width": _during,
+                        "stroke_width_final": _final,
                         "path_transform": icon_path_info["transform"],
                         "path_offset_x": icon_path_info["offset_x"],
                         "path_offset_y": icon_path_info["offset_y"],
@@ -1287,6 +1373,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                         "illustration_end": icon_end_t,
                         "illustration_reveal": reveal_style,
                     })
+                    sound_cues.append({"file": "click.mp3", "start": icon_start_t, "duration": 0.4})
 
             beat_out["sub_visuals"] = sub_visuals
             if illustration_items:
@@ -1295,7 +1382,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 beat_out["popped_icons"] = popped_icons
 
             effective_rows = icon_grid_rows + row_offset
-            target_height = (region["h"] / max(1, effective_rows)) * 0.85
+            target_height = (region["h"] / max(1, effective_rows)) * 0.95
             beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
             _apply_camera_move(beat_out, beat, region, "zoom_in")
@@ -1534,12 +1621,12 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
 
                 if icon_path_info is not None:
                     icon_group_id = f"icon-{beat['beat_id']}-row{row_idx}"
-                    stroke_w = max(0.3, min(3.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"]))
+                    _during, _final = _icon_stroke_widths(icon_path_info["scale"])
                     sub_visuals.append({
                         "beat_id": f"{beat['beat_id']}-row{row_idx}-icon",
                         "subpaths": icon_path_info["subpaths"],
-                        "stroke_width": stroke_w,
-                        "stroke_width_final": stroke_w * icon_path_info["scale"],
+                        "stroke_width": _during,
+                        "stroke_width_final": _final,
                         "path_transform": icon_path_info["transform"],
                         "path_offset_x": icon_path_info["offset_x"],
                         "path_offset_y": icon_path_info["offset_y"],
@@ -1587,6 +1674,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                     if hand:
                         illus_item["mask_wipe_hand"] = hand
                     illustration_items.append(illus_item)
+                    sound_cues.append({"file": "click.mp3", "start": icon_start_t, "duration": 0.4})
 
                 label = (word_item.get("label") or "").strip()
                 if not label:
@@ -1625,7 +1713,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             # region["h"] itself grew to include that row's height too —
             # dividing by n_rows alone here would OVERESTIMATE the hand.
             effective_rows = n_rows + row_offset
-            target_height = (region["h"] / max(1, effective_rows)) * 0.85
+            target_height = (region["h"] / max(1, effective_rows)) * 0.95
             beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
             _apply_camera_move(beat_out, beat, region, "zoom_in")
@@ -1761,7 +1849,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                     # applied AFTER the reveal finishes, not during it.
                     # Wide safety clamp, not a tight band — a tight clamp
                     # was what caused inconsistent results before.
-                    "stroke_width": max(0.3, min(3.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"])),
+                    "stroke_width": _icon_stroke_widths(icon_path_info["scale"])[0],
                     # BUG FOUND AND FIXED: switching to non-scaling-stroke
                     # after the reveal, WITHOUT also updating the numeric
                     # stroke-width value, meant the SAME number suddenly
@@ -1770,8 +1858,11 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                     # is the exact "thick while drawing, thin right after"
                     # bug. stroke_width_final is the equivalent absolute
                     # width, applied at the SAME moment non-scaling-stroke
-                    # is — same visual thickness, no jump.
-                    "stroke_width_final": max(0.3, min(3.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"])) * icon_path_info["scale"],
+                    # is — same visual thickness, no jump. Also floored at
+                    # ICON_STROKE_FINAL_MIN_PX (see _icon_stroke_widths)
+                    # so a heavily-shrunk icon can never fade to
+                    # near-invisible once fully drawn.
+                    "stroke_width_final": _icon_stroke_widths(icon_path_info["scale"])[1],
                     "path_transform": icon_path_info["transform"],
                     "path_offset_x": icon_path_info["offset_x"],
                     "path_offset_y": icon_path_info["offset_y"],
@@ -1815,6 +1906,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 beat_out["illustration_reveal"] = reveal_style
                 if hand:
                     beat_out["mask_wipe_hand"] = hand
+                sound_cues.append({"file": "click.mp3", "start": icon_start_t, "duration": 0.4})
 
             pad = 0.15
             usable_w = text_region["w"] * (1 - 2 * pad)
@@ -1847,7 +1939,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             })
 
             beat_out["sub_visuals"] = sub_visuals
-            target_height = max(region["h"] * 0.40, min(font_size * 4.6, region["h"] * 0.85))
+            target_height = max(region["h"] * 0.48, min(font_size * 5.2, region["h"] * 0.95))
             beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
             _apply_camera_move(beat_out, beat, region, "zoom_in")
@@ -1902,12 +1994,14 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 # icon_word branch above for the full reasoning) —
                 # non-scaling-stroke is applied only AFTER the reveal
                 # completes.
-                _icon_stroke_w = max(0.3, min(3.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"]))
-                beat_out["stroke_width"] = _icon_stroke_w
+                _during, _final = _icon_stroke_widths(icon_path_info["scale"])
+                beat_out["stroke_width"] = _during
                 # Equivalent absolute width for non-scaling-stroke,
                 # applied at the same moment — fixes the thick-then-
-                # thin jump right after the reveal finishes.
-                beat_out["stroke_width_final"] = _icon_stroke_w * icon_path_info["scale"]
+                # thin jump right after the reveal finishes. Floored at
+                # ICON_STROKE_FINAL_MIN_PX (see _icon_stroke_widths) so
+                # a heavily-shrunk icon can never fade to near-invisible.
+                beat_out["stroke_width_final"] = _final
                 beat_out["min_reveal_duration"] = 1.3
                 sound_cues.append({"file": "drawing.mp3", "start": beat["start"], "duration": 1.3})
                 beat_out["path_transform"] = icon_path_info["transform"]
@@ -1935,6 +2029,14 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 if hand:
                     beat_out["mask_wipe_hand"] = hand
                     sound_cues.append({"file": "drawing.mp3", "start": beat["start"], "duration": _draw_reveal_duration})
+                else:
+                    # No drag-hand means this is a pop-in reveal (see
+                    # _illustration_reveal — every illustration now pops
+                    # rather than mask-wipes) — click.mp3 is the cue for
+                    # every icon/image POP, drawing.mp3 above is for the
+                    # (currently unused, but kept for compatibility)
+                    # hand-drag case.
+                    sound_cues.append({"file": "click.mp3", "start": beat["start"], "duration": 0.4})
 
             if "subpaths" in beat_out or "path_d" in beat_out:
                 # target_height proportional to region size for icons — a hand

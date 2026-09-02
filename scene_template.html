@@ -15,8 +15,9 @@
   /* Fixed UI layer — deliberately OUTSIDE #world, never touched by camera moves */
   #caption-layer { position: absolute; top: 10%; left: 0; right: 0; text-align: center;
                    font-family: sans-serif; font-size: 100px; font-weight: 600;
-                   text-shadow: -2px -2px 0 #fff, 2px -2px 0 #fff, -2px 2px 0 #fff, 2px 2px 0 #fff,
-                                0 0 12px rgba(255,255,255,0.9);
+                   text-shadow: -3px -3px 0 #fff, 3px -3px 0 #fff, -3px 3px 0 #fff, 3px 3px 0 #fff,
+                                -3px 0 0 #fff, 3px 0 0 #fff, 0 -3px 0 #fff, 0 3px 0 #fff,
+                                0 0 14px rgba(255,255,255,0.95);
                    pointer-events: none; }
   /* One group visible at a time — see scheduleCaptionGroup below. No
      background/border set here (or on .caption-word) on purpose: the
@@ -728,7 +729,7 @@
   // Scheduled flat with absolute gsap.delayedCall times at boot, same
   // convention as every other timed element in this file (camera
   // keyframes, hand sweep, stroke reveals below).
-  const CAPTION_COLORS = ['#ff5757', '#ffb347', '#3ec98d', '#4d9dff', '#c77dff', '#ff6fb0'];
+  const CAPTION_COLORS = ['#ff5757', '#ff8c1a', '#16a86b', '#2f7dff', '#a855f7', '#ff2f92'];
   // Global, not per-group: with CAPTION_GROUP_SIZE=1 every group has
   // exactly one word, so a per-group index would always be 0 and
   // every word would render the SAME color instead of cycling —
