@@ -1495,24 +1495,44 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 # with a real photo in another (e.g. row 1: "cult" icon +
                 # "joined", row 2: an actual photo of the person + their name).
                 item_asset_type = (icon_item.get("asset_type") or "icon").strip()
-                item_asset_entry = resolve_beat_asset(
-                    {"concept_key": concept_key, "beat_id": f"{beat['beat_id']}-row{row_idx}"},
-                    channel, illustration_cache_dir, asset_type=item_asset_type,
-                )
+                # NO_STOCK_FALLBACK_CHANNELS (psychology): route through the
+                # same guaranteed-icon-only resolver already used by the
+                # pure-icons grid/cluster path above (resolve_icon_stroke_path)
+                # instead of resolve_beat_asset — this channel must NEVER show
+                # a keyword/stock image, only a real vendored icon or (as an
+                # absolute last resort) the guaranteed circle fallback. This
+                # is the fix for icon+word rows silently rendering a blank
+                # slot when a concept had no good vendored match: the old
+                # resolve_beat_asset path could hand back a mask_wipe stock
+                # entry whose image never actually appears. Every OTHER
+                # channel is completely untouched — same resolve_beat_asset
+                # call, same behavior, byte-for-byte as before.
+                if channel in NO_STOCK_FALLBACK_CHANNELS:
+                    icon_path_info, item_asset_entry = resolve_icon_stroke_path(
+                        concept_key, channel, illustration_cache_dir, icon_region,
+                        f"{beat['beat_id']}-row{row_idx}",
+                    )
+                else:
+                    item_asset_entry = resolve_beat_asset(
+                        {"concept_key": concept_key, "beat_id": f"{beat['beat_id']}-row{row_idx}"},
+                        channel, illustration_cache_dir, asset_type=item_asset_type,
+                    )
+                    icon_path_info = None
+                    if item_asset_entry.get("draw_style") == "stroke_reveal":
+                        svg_path = item_asset_entry["asset_ref"].get("path")
+                        # Reduced padding (was default 0.15) — icons were reading small; less
+                        # internal padding means the icon fills more of its allotted box.
+                        icon_path_info = svg_to_path.icon_to_path_d(svg_path, icon_region, padding_ratio=0.08) if svg_path else None
+                        if icon_path_info is None:
+                            raise RuntimeError(
+                                f"beat_id={beat['beat_id']}: row{row_idx} concept_key={concept_key!r} resolved to an "
+                                f"icon with no usable <path> data — pick a different concept_key for this row."
+                            )
                 print(f"[render_pipeline] beat_id={beat['beat_id']} row{row_idx} concept_key={concept_key!r} "
                       f"asset_type={item_asset_type!r} layout={items_layout!r} -> resolved: "
                       f"source={item_asset_entry.get('asset_source')}")
 
-                if item_asset_entry.get("draw_style") == "stroke_reveal":
-                    svg_path = item_asset_entry["asset_ref"].get("path")
-                    # Reduced padding (was default 0.15) — icons were reading small; less
-                    # internal padding means the icon fills more of its allotted box.
-                    icon_path_info = svg_to_path.icon_to_path_d(svg_path, icon_region, padding_ratio=0.08) if svg_path else None
-                    if icon_path_info is None:
-                        raise RuntimeError(
-                            f"beat_id={beat['beat_id']}: row{row_idx} concept_key={concept_key!r} resolved to an "
-                            f"icon with no usable <path> data — pick a different concept_key for this row."
-                        )
+                if icon_path_info is not None:
                     icon_group_id = f"icon-{beat['beat_id']}-row{row_idx}"
                     stroke_w = max(0.3, min(3.0, ICON_STROKE_TARGET_PX / icon_path_info["scale"]))
                     sub_visuals.append({
@@ -1656,7 +1676,19 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             label = beat.get("label") or beat["text"]
 
             asset_type = (beat.get("asset_type") or "icon").strip()
-            asset_entry = resolve_beat_asset(beat, channel, illustration_cache_dir, asset_type=asset_type)
+            # NO_STOCK_FALLBACK_CHANNELS (psychology): same reasoning as the
+            # multi-row 'items' path above — use resolve_icon_stroke_path so
+            # this single icon+label beat can never silently fall back to a
+            # keyword/stock image, only a real vendored icon or the
+            # guaranteed circle fallback. Every other channel keeps the
+            # original resolve_beat_asset call, unchanged.
+            if channel in NO_STOCK_FALLBACK_CHANNELS:
+                _pre_icon_path_info, asset_entry = resolve_icon_stroke_path(
+                    beat.get("concept_key"), channel, illustration_cache_dir, icon_region, beat["beat_id"],
+                )
+            else:
+                asset_entry = resolve_beat_asset(beat, channel, illustration_cache_dir, asset_type=asset_type)
+                _pre_icon_path_info = None
             beat_out["asset"] = asset_entry
             beat_out["region"] = region
             print(f"[render_pipeline] beat_id={beat['beat_id']} icon_word concept_key={beat.get('concept_key')!r} "
@@ -1699,7 +1731,12 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
 
             sub_visuals = []
 
-            if asset_entry.get("draw_style") == "stroke_reveal":
+            if _pre_icon_path_info is not None:
+                # Already resolved above via resolve_icon_stroke_path
+                # (NO_STOCK_FALLBACK_CHANNELS) — real vendored icon or the
+                # guaranteed circle fallback, never a stock image.
+                icon_path_info = _pre_icon_path_info
+            elif asset_entry.get("draw_style") == "stroke_reveal":
                 svg_path = asset_entry["asset_ref"].get("path")
                 icon_path_info = svg_to_path.icon_to_path_d(svg_path, icon_region, padding_ratio=0.08) if svg_path else None
                 if icon_path_info is None:
@@ -1707,6 +1744,10 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                         f"beat_id={beat['beat_id']}: icon_word concept_key resolved to an icon with "
                         f"no usable <path> data — pick a different concept_key for this beat."
                     )
+            else:
+                icon_path_info = None
+
+            if icon_path_info is not None:
                 icon_group_id = f"icon-{beat['beat_id']}"
                 sub_visuals.append({
                     "beat_id": f"{beat['beat_id']}-icon",
@@ -1813,14 +1854,29 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
 
         elif beat["mode"] == "draw" and region:
             asset_type = (beat.get("asset_type") or "icon").strip()
-            asset_entry = resolve_beat_asset(beat, channel, illustration_cache_dir, asset_type=asset_type)
+            # NO_STOCK_FALLBACK_CHANNELS (psychology): same reasoning as the
+            # icon_word paths above — resolve_icon_stroke_path guarantees a
+            # real vendored icon or the circle fallback, never a stock
+            # image, for this channel. Every other channel is untouched.
+            if channel in NO_STOCK_FALLBACK_CHANNELS:
+                _pre_icon_path_info, asset_entry = resolve_icon_stroke_path(
+                    beat.get("concept_key"), channel, illustration_cache_dir, region, beat["beat_id"],
+                )
+            else:
+                asset_entry = resolve_beat_asset(beat, channel, illustration_cache_dir, asset_type=asset_type)
+                _pre_icon_path_info = None
             beat_out["asset"] = asset_entry
             beat_out["region"] = region
             print(f"[render_pipeline] beat_id={beat['beat_id']} concept_key={beat.get('concept_key')!r} "
                   f"asset_type={asset_type!r} -> resolved: source={asset_entry.get('asset_source')} "
                   f"ref={asset_entry.get('asset_ref')} draw_style={asset_entry.get('draw_style')}")
 
-            if asset_entry.get("draw_style") == "stroke_reveal":
+            if _pre_icon_path_info is not None:
+                # Already resolved above via resolve_icon_stroke_path
+                # (NO_STOCK_FALLBACK_CHANNELS) — real vendored icon or the
+                # guaranteed circle fallback, never a stock image.
+                icon_path_info = _pre_icon_path_info
+            elif asset_entry.get("draw_style") == "stroke_reveal":
                 svg_path = asset_entry["asset_ref"].get("path")
                 icon_path_info = svg_to_path.icon_to_path_d(svg_path, region) if svg_path else None
                 if icon_path_info is None:
@@ -1829,6 +1885,10 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                         f"<path> data (see svg_to_path.py LIMITATION) — pick a different icon for this "
                         f"concept_key or extend svg_to_path.py to handle primitive shapes."
                     )
+            else:
+                icon_path_info = None
+
+            if icon_path_info is not None:
                 beat_out["subpaths"] = icon_path_info["subpaths"]
                 # BUG FIXED (historical): was f"icon-{concept_key}" —
                 # collided when two SEPARATE, unrelated beats picked the

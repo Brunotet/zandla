@@ -13,8 +13,8 @@
   .drawable-path { fill: none; stroke: #1a1a1a; stroke-linecap: round; stroke-linejoin: round; }
   .illustration-img { }
   /* Fixed UI layer — deliberately OUTSIDE #world, never touched by camera moves */
-  #caption-layer { position: absolute; top: 15%; left: 0; right: 0; text-align: center;
-                   font-family: sans-serif; font-size: 82px; font-weight: 600;
+  #caption-layer { position: absolute; top: 10%; left: 0; right: 0; text-align: center;
+                   font-family: sans-serif; font-size: 100px; font-weight: 600;
                    text-shadow: -2px -2px 0 #fff, 2px -2px 0 #fff, -2px 2px 0 #fff, 2px 2px 0 #fff,
                                 0 0 12px rgba(255,255,255,0.9);
                    pointer-events: none; }
@@ -662,6 +662,63 @@
     }
   }
 
+  // ── Popped icons (cluster style satellites) ─────────────────────
+  // A REAL vendored vector icon (never a stock photo — see
+  // resolve_icon_stroke_path's channel-gated no-stock-fallback rule)
+  // that pops in/out instead of being stroke-drawn — used for the
+  // satellite icons in the "cluster" icon_layout (see
+  // _layout_icon_cluster in render_pipeline.py): the center icon is
+  // still hand-drawn via animateStrokeReveal, unchanged; everything
+  // else in the cluster uses THIS function instead. World-space (lives
+  // in contentLayer, the SVG), unlike captions/illustrations — this is
+  // still content ON THE BOARD, panning/zooming with the camera like
+  // any other drawn icon, just revealed differently.
+  function animateIconPop(popEntry) {
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    popEntry.subpaths.forEach((d) => {
+      const el = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      el.setAttribute('d', d);
+      el.setAttribute('class', 'drawable-path');
+      el.style.strokeWidth = popEntry.stroke_width || 4;
+      if (popEntry.path_transform) {
+        el.setAttribute('transform', popEntry.path_transform);
+      }
+      // No dasharray/dashoffset here on purpose — unlike
+      // animateStrokeReveal, this icon is meant to appear FULLY DRAWN
+      // the instant it pops in, not progressively traced.
+      g.appendChild(el);
+    });
+
+    g.style.opacity = '0';
+    const px = popEntry.pivot_x, py = popEntry.pivot_y;
+    const scaleState = { s: 0 };
+    g.setAttribute('transform', `translate(${px},${py}) scale(${scaleState.s}) translate(${-px},${-py})`);
+    contentLayer.appendChild(g);
+
+    const popDuration = 0.35;
+    gsap.delayedCall(Math.max(0, popEntry.start), () => {
+      gsap.to(g.style, { opacity: 1, duration: popDuration, ease: 'power2.out' });
+      gsap.to(scaleState, {
+        s: 1.0, duration: popDuration, ease: 'back.out(1.7)',
+        onUpdate: () => {
+          g.setAttribute('transform', `translate(${px},${py}) scale(${scaleState.s}) translate(${-px},${-py})`);
+        },
+      });
+    });
+
+    const outDuration = 0.25;
+    gsap.delayedCall(Math.max(0, popEntry.end), () => {
+      gsap.to(g.style, { opacity: 0, duration: outDuration, ease: 'power1.in' });
+      gsap.to(scaleState, {
+        s: 0.85, duration: outDuration, ease: 'back.in(1.7)',
+        onUpdate: () => {
+          g.setAttribute('transform', `translate(${px},${py}) scale(${scaleState.s}) translate(${-px},${-py})`);
+        },
+        onComplete: () => g.remove(),
+      });
+    });
+  }
+
   // ── Word-synced captions ────────────────────────────────────────
   // Pops one word in at a time, exactly on that word's own real
   // Chatterbox timestamp — not the whole caption line at once — then
@@ -733,6 +790,14 @@
       // additive array, doesn't touch the single-illustration case above.
       if (beat.illustration_items) {
         beat.illustration_items.forEach((illus) => animateMaskWipe(illus));
+      }
+      // Cluster-style satellite icons (real vendored icons that pop
+      // instead of stroke-drawing — see _layout_icon_cluster). Parallel,
+      // additive array, same pattern as illustration_items above; the
+      // CENTER icon of a cluster beat is a normal entry in sub_visuals
+      // below, unaffected.
+      if (beat.popped_icons) {
+        beat.popped_icons.forEach((popEntry) => animateIconPop(popEntry));
       }
       beat.sub_visuals.forEach((sub) => {
         animateStrokeReveal(sub, traceHandCallback(h));
