@@ -1,10 +1,8 @@
 name: Render Hand-Draw Video
-
 # Trigger-and-callback shape matching your EXISTING n8n convention
 # (payload_b64 / render_id / callback_url) rather than inventing new
 # field names — same async pattern as tongue-twisters, just conforming
 # to the exact input shape your n8n HTTP Request node already sends.
-
 on:
   workflow_dispatch:
     inputs:
@@ -29,25 +27,64 @@ on:
         required: false
         type: boolean
         default: true
-
 jobs:
   render:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
-
+      # ── CACHING, added to cut down the "Install dependencies" step ──
+      # (was taking ~20 minutes on every single run). setup-python's
+      # cache:"pip" above already caches pip's own download cache keyed
+      # on requirements.txt — that part was already working. The two
+      # things that were NOT cached, and are almost certainly the real
+      # cost here: (1) Playwright's Chromium browser binary, which
+      # `playwright install --with-deps chromium` re-downloads from
+      # scratch every run regardless of pip cache, and (2) the .deb
+      # packages apt-get fetches for ffmpeg and Playwright's OS-level
+      # dependencies (libnss3, libatk, etc. — bundled into --with-deps).
+      # Both are cached below with straightforward, standard
+      # actions/cache patterns. NEITHER cache being empty (first run
+      # after this change, or a Playwright/requirements.txt version
+      # bump) breaks anything — cache-miss just falls through to the
+      # exact same full install this workflow already did before.
+      - name: Cache Playwright browser binaries
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          # Keyed on requirements.txt's hash since that's where the
+          # playwright package (and therefore its matching browser
+          # build) version is pinned — a version bump there naturally
+          # invalidates this key and downloads the new matching browser.
+          key: playwright-browsers-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+      - name: Cache apt packages (ffmpeg + Playwright OS deps)
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          # Static-ish key: these are OS-level packages (ffmpeg,
+          # libnss3, libatk, etc.) that essentially never change
+          # between runs unless Ubuntu's own package versions roll —
+          # restore-keys below still gives a PARTIAL hit (skips
+          # re-downloading whatever's already cached) even if the
+          # exact key ever misses.
+          key: apt-archives-${{ runner.os }}-v1
+          restore-keys: |
+            apt-archives-${{ runner.os }}-
       - name: Install dependencies
         run: |
           sudo apt-get update -y && sudo apt-get install -y ffmpeg
           pip install -r requirements.txt
-          playwright install --with-deps chromium
-
+      - name: Install Playwright Chromium (full download)
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: playwright install --with-deps chromium
+      - name: Install Playwright OS deps only (browser already cached)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: playwright install-deps chromium
       - name: Decode dispatch payload
         env:
           PAYLOAD_B64: ${{ inputs.payload_b64 }}
@@ -66,7 +103,6 @@ jobs:
           json.dump(d, open('/tmp/payload.json', 'w'))
           print(f\"ok — render_id={d['render_id']}, {len(d['beats'])} beats\")
           "
-
       - name: Build scene program + render
         env:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
@@ -77,19 +113,16 @@ jobs:
             --channel "${{ inputs.channel }}" \
             --payload /tmp/payload.json \
             --out /tmp/output.mp4
-
       - name: Upload to R2 (presigned PUT, SigV4)
         if: ${{ inputs.skip_upload != true }}
         run: |
           python3 tools/upload_r2.py \
             --file /tmp/output.mp4 \
             --payload /tmp/payload.json
-
       - name: Callback to n8n
         if: ${{ inputs.skip_upload != true }}
         run: |
           python3 tools/resume_n8n.py --payload /tmp/payload.json
-
       - name: Attach rendered video as downloadable artifact (test mode)
         if: ${{ inputs.skip_upload == true }}
         uses: actions/upload-artifact@v4
