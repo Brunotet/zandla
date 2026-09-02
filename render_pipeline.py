@@ -1268,8 +1268,17 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                     _fallback_base = number_end_t if (has_number and number_end_t is not None) else beat["start"]
                     icon_start_t = _fallback_base + i * per_icon_duration
                     icon_end_t = icon_start_t + min(0.9, per_icon_duration * 0.9)
-                sound_cues.append({"file": "drawing.mp3", "start": icon_start_t,
-                                    "duration": icon_end_t - icon_start_t})
+                # BUG FIXED (confirmed by direct report — click.mp3 and
+                # drawing.mp3 audibly overlapping on a pop event): this
+                # used to unconditionally queue drawing.mp3 for EVERY
+                # icon in this loop, before it was even known whether
+                # that icon would end up hand-drawn or POPPED (satellite
+                # / stock-fallback, both below). A popped icon was then
+                # getting BOTH drawing.mp3 AND its own click.mp3 for the
+                # same reveal. drawing.mp3 now only gets queued inside
+                # the actual hand-drawn branch further down — click.mp3
+                # (already correct) remains the ONLY cue for both pop
+                # cases (satellite and stock-fallback).
 
                 # FIXED after a real production crash: this used to require
                 # draw_style == "stroke_reveal" and raise the ENTIRE render
@@ -1333,6 +1342,8 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                     # Center icon (cluster style) or any icon (grid
                     # style) — normal hand-drawn stroke reveal, unchanged.
                     icon_group_id = f"icon-{beat['beat_id']}-grid{i}"
+                    sound_cues.append({"file": "drawing.mp3", "start": icon_start_t,
+                                        "duration": icon_end_t - icon_start_t})
                     _during, _final = _icon_stroke_widths(icon_path_info["scale"])
                     sub_visuals.append({
                         "beat_id": f"{beat['beat_id']}-grid{i}-icon",
@@ -1571,7 +1582,14 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                     icon_end_t = icon_start_t + icon_duration
                     word_start_t = icon_end_t
                     word_end_t = word_start_t + word_duration
-                sound_cues.append({"file": "drawing.mp3", "start": icon_start_t, "duration": icon_duration})
+                # NOTE: wrighting.mp3 for the word stays unconditional
+                # here — the word/label is ALWAYS hand-written regardless
+                # of how the icon resolves. drawing.mp3 for the ICON is
+                # NOT queued here anymore (see the fix below, mirroring
+                # the same bug fixed in the pure-icons grid/cluster loop
+                # above) — it now only fires inside the actual hand-drawn
+                # branch, so a pop-fallback icon gets ONLY its click.mp3,
+                # never both.
                 sound_cues.append({"file": "wrighting.mp3", "start": word_start_t, "duration": word_duration})
 
                 concept_key = (icon_item.get("concept_key") or "").strip()
@@ -1621,6 +1639,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
 
                 if icon_path_info is not None:
                     icon_group_id = f"icon-{beat['beat_id']}-row{row_idx}"
+                    sound_cues.append({"file": "drawing.mp3", "start": icon_start_t, "duration": icon_duration})
                     _during, _final = _icon_stroke_widths(icon_path_info["scale"])
                     sub_visuals.append({
                         "beat_id": f"{beat['beat_id']}-row{row_idx}-icon",
@@ -1814,7 +1833,12 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 icon_end_t = icon_start_t + icon_duration
                 label_start_t = icon_end_t
                 label_end_t = label_start_t + label_duration
-            sound_cues.append({"file": "drawing.mp3", "start": icon_start_t, "duration": icon_duration})
+            # NOTE: wrighting.mp3 for the label stays unconditional — the
+            # label is always hand-written regardless of the icon's
+            # outcome. drawing.mp3 for the ICON now only fires inside the
+            # actual hand-drawn branch below (same fix as the grid/cluster
+            # and items-rows cases) so a pop-fallback icon only ever gets
+            # its own click.mp3, never both at once.
             sound_cues.append({"file": "wrighting.mp3", "start": label_start_t, "duration": label_duration})
 
             sub_visuals = []
@@ -1837,6 +1861,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
 
             if icon_path_info is not None:
                 icon_group_id = f"icon-{beat['beat_id']}"
+                sound_cues.append({"file": "drawing.mp3", "start": icon_start_t, "duration": icon_duration})
                 sub_visuals.append({
                     "beat_id": f"{beat['beat_id']}-icon",
                     "subpaths": icon_path_info["subpaths"],
