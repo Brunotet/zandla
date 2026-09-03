@@ -778,6 +778,15 @@
 
   // ── Beat dispatch ─────────────────────────────────────────────────
   function scheduleBeat(beat) {
+    // PURE PHOTO SEQUENCE (history channel "photos" list of 2-4 real
+    // photos) — illustration_items with NO sub_visuals means there's
+    // no icon/word content alongside them, just photos cycling one at
+    // a time through the SAME region, each already popping in/out via
+    // animateMaskWipe's existing pop-in/pop-out behavior.
+    if (beat.illustration_items && beat.illustration_items.length > 0 && !beat.sub_visuals) {
+      beat.illustration_items.forEach((illus) => animateMaskWipe(illus));
+      return;
+    }
     if (beat.mode === 'icon_word' && beat.sub_visuals && beat.hand) {
       // 'food' icon + written word 'good' sharing one beat/region —
       // both sub-visuals reuse the exact same stroke-reveal renderer

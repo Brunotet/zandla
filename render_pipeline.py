@@ -1969,6 +1969,73 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
 
             _apply_camera_move(beat_out, beat, region, "zoom_in")
 
+        elif beat["mode"] == "draw" and region and beat.get("photos"):
+            # MULTI-PHOTO SEQUENCE — 2-4 real historical photos cycling
+            # through the SAME region, one at a time, synced to the real
+            # per-word timing of this beat's own sentence — mirrors the
+            # psychology channel's "icons" cluster/grid mechanism above,
+            # but for REAL PHOTOS instead of vendored icons, and gated to
+            # HISTORICAL_CHANNELS instead of psychology specifically.
+            # Reuses the SAME _word_synced_slots timing function that
+            # mechanism already established, and the SAME animateMaskWipe
+            # pop-in/pop-out reveal every illustration already gets —
+            # this is just multiple of them, sharing one region, timed
+            # to not overlap.
+            if channel not in HISTORICAL_CHANNELS:
+                raise RuntimeError(
+                    f"beat_id={beat['beat_id']}: 'photos' (multi-photo sequence) is only supported on "
+                    f"history-type channels per direct request — got channel={channel!r}. Use a single "
+                    f"concept_key/asset_type='photo' beat for this channel instead."
+                )
+            photos = beat["photos"]
+            if not isinstance(photos, list) or not (2 <= len(photos) <= 4):
+                raise RuntimeError(
+                    f"beat_id={beat['beat_id']}: 'photos' must be a list of 2-4 concept_keys — got {photos!r}. "
+                    f"A single photo should just be a plain concept_key/asset_type='photo' beat instead."
+                )
+
+            n_photos = len(photos)
+            global_words = timing["words"]
+            beat_words = [w for w in global_words if beat["start"] - 0.05 <= w["start"] < beat["end"] + 0.05]
+            word_slots = _word_synced_slots(beat_words, n_photos)
+
+            if word_slots is None:
+                print(f"[render_pipeline] beat_id={beat['beat_id']}: not enough real narration words "
+                      f"({len(beat_words)}) for {n_photos} photos — falling back to fixed-proportion timing")
+                _buffer = 1.1
+                _beat_duration = max(0.01, beat["end"] - beat["start"])
+                _usable = max(1.0, _beat_duration - _buffer)
+                per_photo_duration = _usable / n_photos
+
+            illustration_items = []
+            beat_out["region"] = region
+            for i, concept_key_raw in enumerate(photos):
+                concept_key = str(concept_key_raw).strip()
+                if not concept_key:
+                    raise RuntimeError(f"beat_id={beat['beat_id']}: photos[{i}] is empty")
+                if word_slots is not None:
+                    photo_start_t, photo_end_t = word_slots[i]
+                else:
+                    photo_start_t = beat["start"] + i * per_photo_duration
+                    photo_end_t = photo_start_t + per_photo_duration
+
+                photo_asset_entry = resolve_beat_asset(
+                    {"concept_key": concept_key, "beat_id": f"{beat['beat_id']}-photo{i}"},
+                    channel, illustration_cache_dir, asset_type="photo",
+                )
+                print(f"[render_pipeline] beat_id={beat['beat_id']} photo{i} concept_key={concept_key!r} "
+                      f"-> resolved: source={photo_asset_entry.get('asset_source')}")
+                illustration_items.append({
+                    "beat_id": f"{beat['beat_id']}-photo{i}-illus",
+                    "illustration_path": photo_asset_entry["asset_ref"].get("cached_path"),
+                    "illustration_region": region,  # SAME region for every photo — stays in place, only the image changes
+                    "illustration_start": photo_start_t,
+                    "illustration_end": photo_end_t,
+                    "illustration_reveal": "pop",
+                })
+            beat_out["illustration_items"] = illustration_items
+            _apply_camera_move(beat_out, beat, region, "zoom_in")
+
         elif beat["mode"] == "draw" and region:
             asset_type = (beat.get("asset_type") or "icon").strip()
             # NO_STOCK_FALLBACK_CHANNELS (psychology): same reasoning as the
