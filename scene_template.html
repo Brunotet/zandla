@@ -814,6 +814,17 @@
       });
       return;
     }
+    if (beat.mode === 'draw' && beat.popped_icons) {
+      // FORCE_POP_ICON_FOLDERS (render_pipeline.py) — a plain "draw"
+      // beat whose single icon came from a folder that skips hand-
+      // drawing entirely pops in instead, same as a cluster satellite.
+      // Checked BEFORE the illustration_path/subpaths checks below
+      // since this beat has neither of those set — without this
+      // branch it would match none of the conditions further down and
+      // silently render nothing at all.
+      beat.popped_icons.forEach((popEntry) => animateIconPop(popEntry));
+      return;
+    }
     if (beat.mode === 'draw' && beat.illustration_path) {
       animateMaskWipe(beat);
       return;

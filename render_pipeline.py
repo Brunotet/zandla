@@ -94,6 +94,88 @@ def _icon_stroke_widths(scale: float) -> tuple:
     during = max(0.3, min(3.0, ICON_STROKE_TARGET_PX / scale))
     final = max(ICON_STROKE_FINAL_MIN_PX, during * scale)
     return during, final
+
+
+# ══════════════════════════════════════════════════════════════════
+# FORCE-POP ICON FOLDERS — added per direct report of two SEPARATE
+# symptoms on icons drawn via the normal hand-stroke-reveal technique:
+# (1) the icon's outline visually completes noticeably FASTER than the
+#     hand sprite tracing it — hand trails behind an already-finished
+#     drawing instead of leading it, and
+# (2) some icons don't appear AT ALL — the hand animates (or freezes)
+#     for the icon's full allotted duration but nothing is ever drawn.
+#
+# Both are consistent with certain vendored SVGs not surviving the
+# stroke-dasharray reveal technique cleanly — this file doesn't have
+# svg_to_path.py (the actual SVG-to-path-data converter), so the exact
+# structural reason (multi-subpath compound paths, degenerate/near-
+# zero-length segments after fitting, etc.) can't be confirmed from
+# here. Rather than guess at a Python-side path-length heuristic that
+# could misfire on a perfectly fine icon (a real risk — some valid
+# icons legitimately have a tiny subpath, e.g. the dot under an
+# exclamation mark), THIS is the safe, general-purpose fix: any icon
+# resolved from a folder listed here skips the stroke-reveal technique
+# ENTIRELY and instead pops in fully-formed (same technique already
+# proven correct for cluster satellite icons) — no path-length
+# calculation involved at all, so this class of bug can't occur for
+# it, regardless of why the underlying SVG behaves oddly.
+#
+# "modern" is a hypothesis, not a confirmed fact — it's the ONE vendor
+# folder added specifically for this channel, prioritized first for
+# every psychology-channel icon (see asset_resolver.PRIORITY_LIBRARY_
+# BY_CHANNEL), and every icon-rendering bug reported so far (thin
+# strokes, blank icons, and now these two) has been on this channel.
+# The enhanced per-icon log line below now always prints the resolved
+# vendor folder — confirm against the NEXT render's log which folder
+# the specific broken icons actually came from, and adjust this set if
+# it turns out to be a different folder (or more than one).
+FORCE_POP_ICON_FOLDERS = {"modern"}
+
+
+def _icon_vendor_folder(svg_path) -> str:
+    """Returns the vendor folder name (e.g. 'modern', 'tabler') a
+    resolved icon's SVG file lives under, by matching it against
+    asset_resolver.VENDOR_ICON_DIRS — or None if svg_path is falsy or
+    doesn't fall under any known vendor directory (a stock/photo asset,
+    for instance, which never reaches this check anyway since it has
+    no svg_path at all)."""
+    if not svg_path:
+        return None
+    svg_path = os.path.abspath(svg_path)
+    for lib_name, lib_dir in asset_resolver.VENDOR_ICON_DIRS.items():
+        if svg_path.startswith(os.path.abspath(lib_dir) + os.sep):
+            return lib_name
+    return None
+
+
+def _should_force_pop(asset_entry: dict) -> bool:
+    """True if this resolved (vendored SVG) asset's folder is in
+    FORCE_POP_ICON_FOLDERS. Safe to call on ANY asset_entry — a stock/
+    photo entry (no 'path' key) or the guaranteed circle fallback
+    (also no real vendor path) simply returns False, unaffected."""
+    svg_path = (asset_entry or {}).get("asset_ref", {}).get("path")
+    return _icon_vendor_folder(svg_path) in FORCE_POP_ICON_FOLDERS
+
+
+def _pop_icon_dict(icon_path_info: dict, beat_id: str, box: dict, start_t: float, end_t: float) -> dict:
+    """Builds a popped_icons-style entry — same shape the pure-icons
+    cluster/grid satellite mechanism already emits and
+    scene_template.html already knows how to render generically for
+    ANY beat (see the top-level `if (beat.popped_icons)` check) —
+    reused here for any FORCE_POP_ICON_FOLDERS icon regardless of
+    which mode/beat type it's attached to."""
+    _during, _final = _icon_stroke_widths(icon_path_info["scale"])
+    stroke_w = _final / icon_path_info["scale"]
+    return {
+        "beat_id": beat_id,
+        "subpaths": icon_path_info["subpaths"],
+        "stroke_width": stroke_w,
+        "path_transform": icon_path_info["transform"],
+        "pivot_x": box["x"] + box["w"] / 2,
+        "pivot_y": box["y"] + box["h"] / 2,
+        "start": start_t,
+        "end": end_t,
+    }
 ROW_CONTENT_H = 230  # compact, FIXED row height for multi-row icon_word "items" — NOT
                       # stretched to fill the (intentionally oversized, for bleed-prevention)
                       # allocated region. That stretch was the actual root cause of "rows too
@@ -1138,23 +1220,32 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
 
         elif beat["mode"] == "icon_word" and region and beat.get("icons"):
             # NEW: pure icon-only listicle items, per direct request —
-            # PSYCHOLOGY CHANNEL ONLY (enforced below, not just left to
-            # the prompt to get right, same "hardcode, don't rely on
-            # upstream alone" discipline as every other channel-specific
-            # behavior in this file). Replaces the icon+word row layout
-            # for beats using "icons" instead of "items": no word
-            # captions at all, just 1-4 icons arranged in a left/right
-            # grid via _layout_icon_grid — one row of 2 for N=2, row 1
-            # left+right + a centered lone icon on row 2 for N=3, a full
-            # 2x2 grid for N=4. Mirrors the "items" branch's number
-            # handling and word-synced timing exactly; the only real
-            # difference is the grid layout and the absence of any word
-            # visuals at all.
-            if channel != "psychology":
+            # PSYCHOLOGY AND HISTORY CHANNELS (enforced below, not just
+            # left to the prompt to get right, same "hardcode, don't
+            # rely on upstream alone" discipline as every other
+            # channel-specific behavior in this file). Replaces the
+            # icon+word row layout for beats using "icons" instead of
+            # "items": no word captions at all, just 1-4 icons arranged
+            # in a left/right grid via _layout_icon_grid — one row of 2
+            # for N=2, row 1 left+right + a centered lone icon on row 2
+            # for N=3, a full 2x2 grid for N=4. Mirrors the "items"
+            # branch's number handling and word-synced timing exactly;
+            # the only real difference is the grid layout and the
+            # absence of any word visuals at all.
+            #
+            # History is NOT in NO_STOCK_FALLBACK_CHANNELS (unchanged,
+            # not extended here) — so a history 'icons' beat that hits a
+            # concept with no vendored match automatically falls through
+            # to this same code's EXISTING stock-image-in-that-grid-slot
+            # fallback further down, exactly like history's other icon
+            # beats already do. Psychology's separate guaranteed-never-
+            # fail-never-stock behavior is completely unaffected.
+            ICON_GRID_CHANNELS = {"psychology", "history"}
+            if channel not in ICON_GRID_CHANNELS:
                 raise RuntimeError(
                     f"beat_id={beat['beat_id']}: 'icons' (icon-only grid) is only supported on the "
-                    f"psychology channel per direct request — got channel={channel!r}. Use 'items' "
-                    f"(icon,word pairs) for this channel instead."
+                    f"{sorted(ICON_GRID_CHANNELS)} channels per direct request — got channel={channel!r}. "
+                    f"Use 'items' (icon,word pairs) for this channel instead."
                 )
 
             icons = beat["icons"]
@@ -1298,41 +1389,38 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 icon_path_info, item_asset_entry = resolve_icon_stroke_path(
                     concept_key, channel, illustration_cache_dir, icon_boxes[i], f"{beat['beat_id']}-icon{i}",
                 )
+                _icon_folder = _icon_vendor_folder((item_asset_entry or {}).get("asset_ref", {}).get("path"))
                 print(f"[render_pipeline] beat_id={beat['beat_id']} icon{i} concept_key={concept_key!r} "
-                      f"-> resolved: source={item_asset_entry.get('asset_source')}")
+                      f"-> resolved: source={item_asset_entry.get('asset_source')} folder={_icon_folder or 'n/a'}")
 
                 is_satellite = icon_layout_style == "cluster" and i > 0
+                # FORCE_POP_ICON_FOLDERS (see definition above): forces
+                # even the CENTER/grid icon (which would otherwise be
+                # hand-drawn) to pop instead, when it came from one of
+                # those folders — "regardless of what the visual plan
+                # says", per direct request.
+                force_pop = icon_path_info is not None and _should_force_pop(item_asset_entry)
 
-                if icon_path_info is not None and is_satellite:
-                    # Cluster satellite: a REAL vendored icon (never a
-                    # stock photo — same resolution/retry as the center
-                    # icon above), but revealed by POPPING in/out (see
-                    # animateIconPop) instead of being hand-drawn.
-                    # pivot_x/y = this icon's own box center, so the pop
-                    # scales around itself, not the region's origin.
-                    _during, _final = _icon_stroke_widths(icon_path_info["scale"])
-                    # Satellites NEVER switch to non-scaling-stroke (see
-                    # animateIconPop in scene_template.html — they pop in
-                    # fully-drawn, no reveal-then-swap step), so their one
-                    # local stroke_width IS their permanent visual width
-                    # once the icon's own baked-in fit-scale transform is
-                    # applied — dividing the guaranteed FINAL width by
-                    # scale here is what makes that guarantee hold for
-                    # satellites too, not just hand-drawn icons.
-                    stroke_w = _final / icon_path_info["scale"]
+                if icon_path_info is not None and (is_satellite or force_pop):
+                    # Cluster satellite, OR a forced-pop-folder icon
+                    # (center or grid, any layout) — a REAL vendored icon
+                    # (never a stock photo — same resolution/retry as
+                    # any other icon here), revealed by POPPING in/out
+                    # (see animateIconPop) instead of being hand-drawn.
                     box = icon_boxes[i]
-                    popped_icons.append({
-                        "beat_id": f"{beat['beat_id']}-cluster{i}-icon",
-                        "subpaths": icon_path_info["subpaths"],
-                        "stroke_width": stroke_w,
-                        "path_transform": icon_path_info["transform"],
-                        "pivot_x": box["x"] + box["w"] / 2,
-                        "pivot_y": box["y"] + box["h"] / 2,
-                        "start": icon_start_t,
-                        "end": icon_end_t,
-                    })
-                    # Click sound exactly when this satellite pops in —
-                    # per direct request, every icon POP (as opposed to a
+                    # Per direct request, a FORCE-POPPED icon must NOT
+                    # disappear at its own short word-slot end like a
+                    # satellite does — it should stay on screen for the
+                    # rest of the sentence, same as a normal hand-drawn
+                    # icon would. Satellites are unchanged (still pop
+                    # out at their own icon_end_t) since that's existing,
+                    # working, not-reported-as-broken behavior.
+                    pop_end_t = beat["end"] if force_pop else icon_end_t
+                    popped_icons.append(_pop_icon_dict(
+                        icon_path_info, f"{beat['beat_id']}-cluster{i}-icon", box, icon_start_t, pop_end_t,
+                    ))
+                    # Click sound exactly when this icon pops in — per
+                    # direct request, every icon POP (as opposed to a
                     # hand-drawn reveal) gets this cue. duration is a
                     # short, fixed length since this is a one-shot sound
                     # effect, not something that needs to track the pop's
@@ -1506,6 +1594,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
 
             sub_visuals = []
             illustration_items = []
+            popped_icons = []
             beat_out["region"] = region
 
             if has_number:
@@ -1633,11 +1722,24 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                                 f"beat_id={beat['beat_id']}: row{row_idx} concept_key={concept_key!r} resolved to an "
                                 f"icon with no usable <path> data — pick a different concept_key for this row."
                             )
+                _icon_folder = _icon_vendor_folder((item_asset_entry or {}).get("asset_ref", {}).get("path"))
                 print(f"[render_pipeline] beat_id={beat['beat_id']} row{row_idx} concept_key={concept_key!r} "
                       f"asset_type={item_asset_type!r} layout={items_layout!r} -> resolved: "
-                      f"source={item_asset_entry.get('asset_source')}")
+                      f"source={item_asset_entry.get('asset_source')} folder={_icon_folder or 'n/a'}")
 
-                if icon_path_info is not None:
+                if icon_path_info is not None and _should_force_pop(item_asset_entry):
+                    # FORCE_POP_ICON_FOLDERS (see definition near the top
+                    # of this file) — pop instead of hand-draw, same
+                    # mechanism as cluster satellites, "regardless of
+                    # what the visual plan says" per direct request.
+                    # Stays visible until the beat/sentence actually
+                    # ends (not just this row's own short slot) — same
+                    # as a normal hand-drawn icon would.
+                    popped_icons.append(_pop_icon_dict(
+                        icon_path_info, f"{beat['beat_id']}-row{row_idx}-icon", icon_region, icon_start_t, beat["end"],
+                    ))
+                    sound_cues.append({"file": "click.mp3", "start": icon_start_t, "duration": 0.4})
+                elif icon_path_info is not None:
                     icon_group_id = f"icon-{beat['beat_id']}-row{row_idx}"
                     sound_cues.append({"file": "drawing.mp3", "start": icon_start_t, "duration": icon_duration})
                     _during, _final = _icon_stroke_widths(icon_path_info["scale"])
@@ -1718,6 +1820,8 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             beat_out["sub_visuals"] = sub_visuals
             if illustration_items:
                 beat_out["illustration_items"] = illustration_items
+            if popped_icons:
+                beat_out["popped_icons"] = popped_icons
             # BUG FIXED (confirmed by direct comparison): this used a
             # 0.5 multiplier on top of the per-row height, while the
             # single icon_word beat below uses up to 0.85 of its own
@@ -1800,7 +1904,8 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             beat_out["region"] = region
             print(f"[render_pipeline] beat_id={beat['beat_id']} icon_word concept_key={beat.get('concept_key')!r} "
                   f"asset_type={asset_type!r} layout={icon_layout!r} label={label!r} -> resolved: "
-                  f"source={asset_entry.get('asset_source')}")
+                  f"source={asset_entry.get('asset_source')} "
+                  f"folder={_icon_vendor_folder((asset_entry or {}).get('asset_ref', {}).get('path')) or 'n/a'}")
 
             # WORD-SYNCED TIMING (replaces the old fixed-duration-cap
             # scheme per direct feedback): icon and label each get a
@@ -1842,6 +1947,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             sound_cues.append({"file": "wrighting.mp3", "start": label_start_t, "duration": label_duration})
 
             sub_visuals = []
+            popped_icons = []
 
             if _pre_icon_path_info is not None:
                 # Already resolved above via resolve_icon_stroke_path
@@ -1859,7 +1965,17 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             else:
                 icon_path_info = None
 
-            if icon_path_info is not None:
+            if icon_path_info is not None and _should_force_pop(asset_entry):
+                # FORCE_POP_ICON_FOLDERS (see definition near the top of
+                # this file) — pop instead of hand-draw, same mechanism
+                # as cluster satellites, regardless of what the visual
+                # plan asked for. Stays visible until the beat/sentence
+                # actually ends, same as a normal hand-drawn icon would.
+                popped_icons.append(_pop_icon_dict(
+                    icon_path_info, f"{beat['beat_id']}-icon", icon_region, icon_start_t, beat["end"],
+                ))
+                sound_cues.append({"file": "click.mp3", "start": icon_start_t, "duration": 0.4})
+            elif icon_path_info is not None:
                 icon_group_id = f"icon-{beat['beat_id']}"
                 sound_cues.append({"file": "drawing.mp3", "start": icon_start_t, "duration": icon_duration})
                 sub_visuals.append({
@@ -1964,6 +2080,8 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             })
 
             beat_out["sub_visuals"] = sub_visuals
+            if popped_icons:
+                beat_out["popped_icons"] = popped_icons
             target_height = max(region["h"] * 0.48, min(font_size * 5.2, region["h"] * 0.95))
             beat_out["hand"] = gesture_engine.scaled_hand("write", target_height=target_height).to_dict()
 
@@ -1973,14 +2091,13 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             # MULTI-PHOTO SEQUENCE — 2-4 real historical photos cycling
             # through the SAME region, one at a time, synced to the real
             # per-word timing of this beat's own sentence — mirrors the
-            # psychology channel's "icons" cluster/grid mechanism above,
-            # but for REAL PHOTOS instead of vendored icons, and gated to
-            # HISTORICAL_CHANNELS instead of psychology specifically.
-            # Reuses the SAME _word_synced_slots timing function that
-            # mechanism already established, and the SAME animateMaskWipe
-            # pop-in/pop-out reveal every illustration already gets —
-            # this is just multiple of them, sharing one region, timed
-            # to not overlap.
+            # "icons" cluster/grid mechanism above, but for REAL PHOTOS
+            # instead of vendored icons, and gated to HISTORICAL_CHANNELS
+            # instead of psychology. Reuses the SAME _word_synced_slots
+            # timing function that mechanism already established, and
+            # the SAME animateMaskWipe pop-in/pop-out reveal every
+            # illustration already gets — this is just multiple of them,
+            # sharing one region, timed to not overlap.
             if channel not in HISTORICAL_CHANNELS:
                 raise RuntimeError(
                     f"beat_id={beat['beat_id']}: 'photos' (multi-photo sequence) is only supported on "
@@ -2053,7 +2170,8 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             beat_out["region"] = region
             print(f"[render_pipeline] beat_id={beat['beat_id']} concept_key={beat.get('concept_key')!r} "
                   f"asset_type={asset_type!r} -> resolved: source={asset_entry.get('asset_source')} "
-                  f"ref={asset_entry.get('asset_ref')} draw_style={asset_entry.get('draw_style')}")
+                  f"ref={asset_entry.get('asset_ref')} draw_style={asset_entry.get('draw_style')} "
+                  f"folder={_icon_vendor_folder((asset_entry or {}).get('asset_ref', {}).get('path')) or 'n/a'}")
 
             if _pre_icon_path_info is not None:
                 # Already resolved above via resolve_icon_stroke_path
@@ -2072,7 +2190,21 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             else:
                 icon_path_info = None
 
-            if icon_path_info is not None:
+            if icon_path_info is not None and _should_force_pop(asset_entry):
+                # FORCE_POP_ICON_FOLDERS (see definition near the top of
+                # this file) — pop instead of hand-draw, same mechanism
+                # as cluster satellites, regardless of what the visual
+                # plan asked for. Plain "draw" beats have no sub_visuals
+                # list of their own (the icon IS the beat's only
+                # content), so popped_icons goes straight on beat_out.
+                # Stays visible until the beat/sentence actually ends —
+                # same as a normal hand-drawn "draw" icon already does
+                # (it doesn't erase itself early either).
+                beat_out["popped_icons"] = [_pop_icon_dict(
+                    icon_path_info, f"{beat['beat_id']}-icon", region, beat["start"], beat["end"],
+                )]
+                sound_cues.append({"file": "click.mp3", "start": beat["start"], "duration": 0.4})
+            elif icon_path_info is not None:
                 beat_out["subpaths"] = icon_path_info["subpaths"]
                 # BUG FIXED (historical): was f"icon-{concept_key}" —
                 # collided when two SEPARATE, unrelated beats picked the
