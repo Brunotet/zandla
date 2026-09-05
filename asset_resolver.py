@@ -454,7 +454,7 @@ class ResolvedAsset:
 
 
 def resolve(keyword: str, hint: Optional[str] = None, cache_dir: Optional[str] = None,
-            channel: Optional[str] = None) -> Optional[ResolvedAsset]:
+            channel: Optional[str] = None, skip_stock: bool = False) -> Optional[ResolvedAsset]:
     """hint: "icon" | "illustration" | None (search everything, icon
     tier first). Returns None only if every tier failed — caller
     should hard-fail the beat rather than silently skip it, per the
@@ -462,11 +462,27 @@ def resolve(keyword: str, hint: Optional[str] = None, cache_dir: Optional[str] =
     decide that, it just reports what it found. `channel`, if given,
     is threaded through to the vendor icon search — see
     search_vendor_icon_candidates for the priority-library cascade
-    this enables for specific channels."""
+    this enables for specific channels.
+
+    skip_stock: if True and no vendor icon matches, returns None
+    immediately WITHOUT ever calling Pixabay/Openverse/Pexels. Added
+    per direct request for channels where a stock-image result would
+    NEVER actually be used anyway (render_pipeline.py's
+    NO_STOCK_FALLBACK_CHANNELS always discards it in favor of a
+    guaranteed fallback icon) — searching stock sources there was
+    pure wasted network time/API quota, and confusing in the logs
+    (looked like stock images might be getting used when they never
+    were). Default False so every other caller/channel is completely
+    unaffected."""
     if hint != "illustration":
         icon_path = _search_vendor_icons(keyword, channel=channel)
         if icon_path:
             return ResolvedAsset("icon", "svg_path", icon_path, "stroke_reveal")
+
+    if skip_stock:
+        print(f"[assets] '{keyword}': no vendored icon match, and skip_stock=True — "
+              f"not querying Pixabay/Openverse/Pexels at all")
+        return None
 
     candidates = []
     candidates += _fetch_pixabay_candidates(keyword, image_type="illustration")

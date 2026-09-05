@@ -120,16 +120,27 @@ def _icon_stroke_widths(scale: float) -> tuple:
 # calculation involved at all, so this class of bug can't occur for
 # it, regardless of why the underlying SVG behaves oddly.
 #
-# "modern" is a hypothesis, not a confirmed fact — it's the ONE vendor
-# folder added specifically for this channel, prioritized first for
-# every psychology-channel icon (see asset_resolver.PRIORITY_LIBRARY_
-# BY_CHANNEL), and every icon-rendering bug reported so far (thin
-# strokes, blank icons, and now these two) has been on this channel.
-# The enhanced per-icon log line below now always prints the resolved
-# vendor folder — confirm against the NEXT render's log which folder
-# the specific broken icons actually came from, and adjust this set if
-# it turns out to be a different folder (or more than one).
-FORCE_POP_ICON_FOLDERS = {"modern"}
+# "modern" was the ORIGINAL hypothesis — DISPROVEN by the next real
+# render's log: the specific icons reported as broken (sparkles,
+# thumbs down, battery low, medal, person) resolved from folder=tabler
+# and folder=phosphor, not modern at all; "modern" didn't appear
+# anywhere in that log. So this isn't a single-folder problem — kept
+# here in case modern icons turn out to have their own, separate
+# issue later, but it's not doing anything useful right now with an
+# empty set.
+FORCE_POP_ICON_FOLDERS = set()
+
+# Per-concept_key force-pop list — the mechanism that's actually
+# earning its keep right now, since the bug doesn't correlate with any
+# one vendor folder. Every concept_key confirmed (by direct visual
+# report) to reveal wrong when hand-drawn goes here; each one then
+# always pops instead, regardless of which folder it happens to
+# resolve from on any given run. This is a manually-curated list, not
+# a heuristic — add to it as more broken concept_keys get reported.
+FORCE_POP_ICON_CONCEPT_KEYS = {
+    "sparkles", "thumbs down", "battery low", "medal", "person",
+    "warning sign", "layers", "folder",
+}
 
 
 def _icon_vendor_folder(svg_path) -> str:
@@ -148,13 +159,19 @@ def _icon_vendor_folder(svg_path) -> str:
     return None
 
 
-def _should_force_pop(asset_entry: dict) -> bool:
-    """True if this resolved (vendored SVG) asset's folder is in
-    FORCE_POP_ICON_FOLDERS. Safe to call on ANY asset_entry — a stock/
-    photo entry (no 'path' key) or the guaranteed circle fallback
-    (also no real vendor path) simply returns False, unaffected."""
+def _should_force_pop(asset_entry: dict, concept_key: str = None) -> bool:
+    """True if EITHER this resolved (vendored SVG) asset's folder is in
+    FORCE_POP_ICON_FOLDERS, OR its concept_key is in
+    FORCE_POP_ICON_CONCEPT_KEYS. Safe to call on ANY asset_entry — a
+    stock/photo entry (no 'path' key) or the guaranteed circle fallback
+    (also no real vendor path) simply can't match the folder check,
+    and only matches the concept_key check if that exact key was
+    explicitly listed."""
+    if concept_key and concept_key.strip().lower() in FORCE_POP_ICON_CONCEPT_KEYS:
+        return True
     svg_path = (asset_entry or {}).get("asset_ref", {}).get("path")
     return _icon_vendor_folder(svg_path) in FORCE_POP_ICON_FOLDERS
+
 
 
 def _pop_icon_dict(icon_path_info: dict, beat_id: str, box: dict, start_t: float, end_t: float) -> dict:
@@ -438,7 +455,8 @@ def _save_library(path: str, data: dict):
         json.dump(data, f, indent=2)
 
 
-def resolve_beat_asset(beat: dict, channel: str, illustration_cache_dir: str, asset_type: str = "icon") -> dict:
+def resolve_beat_asset(beat: dict, channel: str, illustration_cache_dir: str, asset_type: str = "icon",
+                        skip_stock: bool = False) -> dict:
     """Checks shared + channel library first (curated, no network),
     falls back to live asset_resolver.resolve(), and writes new
     resolutions back to the channel's own library so this is a
@@ -455,7 +473,14 @@ def resolve_beat_asset(beat: dict, channel: str, illustration_cache_dir: str, as
     (set by the Visual Planner), not a per-channel one — a single
     history script mixes real photos of the actual subject with
     generic icons for abstract narration beats, same as psychology
-    already mixes icons with plain "write" beats."""
+    already mixes icons with plain "write" beats.
+
+    skip_stock: passed straight through to asset_resolver.resolve() —
+    see that function's docstring. ONLY ever passed True by
+    resolve_icon_stroke_path, which has its own guaranteed-fallback
+    safety net for exactly the "nothing found" outcome this produces
+    (see the skip_stock branch below) — every other caller keeps the
+    original raise-on-nothing-found behavior, unchanged."""
     concept_key = beat.get("concept_key")
     if not concept_key:
         return None
@@ -482,9 +507,21 @@ def resolve_beat_asset(beat: dict, channel: str, illustration_cache_dir: str, as
         resolved = historical_asset_resolver.resolve(concept_key, cache_dir=illustration_cache_dir)
         source_desc = "Wikimedia Commons/LOC/NASA/Internet Archive"
     else:
-        resolved = asset_resolver.resolve(concept_key, cache_dir=illustration_cache_dir, channel=channel)
+        resolved = asset_resolver.resolve(concept_key, cache_dir=illustration_cache_dir, channel=channel,
+                                           skip_stock=skip_stock)
         source_desc = "icons or any stock source"
     if resolved is None:
+        if skip_stock:
+            # Only reached with skip_stock=True (i.e. only from
+            # resolve_icon_stroke_path), which ALWAYS has its own
+            # guaranteed-fallback icon ready for exactly this outcome —
+            # returning a benign "nothing found" entry here (instead of
+            # raising) is what lets that fallback actually kick in,
+            # same as it always has for the "found a stock image but
+            # this channel refuses to use it" case. Every OTHER caller
+            # never passes skip_stock=True and keeps the original raise
+            # below, unchanged.
+            return {"asset_source": "none_skip_stock", "draw_style": "none", "asset_ref": {}}
         raise RuntimeError(
             f"No asset found for concept_key '{concept_key}' (beat_id={beat.get('beat_id')}) "
             f"across {source_desc} — cannot render this beat. Add a curated entry "
@@ -593,6 +630,7 @@ def resolve_icon_stroke_path(concept_key: str, channel: str, illustration_cache_
     """
     asset_entry = resolve_beat_asset(
         {"concept_key": concept_key, "beat_id": beat_id}, channel, illustration_cache_dir, asset_type="icon",
+        skip_stock=(channel in NO_STOCK_FALLBACK_CHANNELS),
     )
     if asset_entry.get("draw_style") != "stroke_reveal":
         if channel in NO_STOCK_FALLBACK_CHANNELS:
@@ -1399,7 +1437,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 # hand-drawn) to pop instead, when it came from one of
                 # those folders — "regardless of what the visual plan
                 # says", per direct request.
-                force_pop = icon_path_info is not None and _should_force_pop(item_asset_entry)
+                force_pop = icon_path_info is not None and _should_force_pop(item_asset_entry, concept_key)
 
                 if icon_path_info is not None and (is_satellite or force_pop):
                     # Cluster satellite, OR a forced-pop-folder icon
@@ -1727,7 +1765,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                       f"asset_type={item_asset_type!r} layout={items_layout!r} -> resolved: "
                       f"source={item_asset_entry.get('asset_source')} folder={_icon_folder or 'n/a'}")
 
-                if icon_path_info is not None and _should_force_pop(item_asset_entry):
+                if icon_path_info is not None and _should_force_pop(item_asset_entry, concept_key):
                     # FORCE_POP_ICON_FOLDERS (see definition near the top
                     # of this file) — pop instead of hand-draw, same
                     # mechanism as cluster satellites, "regardless of
@@ -1965,7 +2003,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             else:
                 icon_path_info = None
 
-            if icon_path_info is not None and _should_force_pop(asset_entry):
+            if icon_path_info is not None and _should_force_pop(asset_entry, beat.get("concept_key")):
                 # FORCE_POP_ICON_FOLDERS (see definition near the top of
                 # this file) — pop instead of hand-draw, same mechanism
                 # as cluster satellites, regardless of what the visual
@@ -2190,7 +2228,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
             else:
                 icon_path_info = None
 
-            if icon_path_info is not None and _should_force_pop(asset_entry):
+            if icon_path_info is not None and _should_force_pop(asset_entry, beat.get("concept_key")):
                 # FORCE_POP_ICON_FOLDERS (see definition near the top of
                 # this file) — pop instead of hand-draw, same mechanism
                 # as cluster satellites, regardless of what the visual
