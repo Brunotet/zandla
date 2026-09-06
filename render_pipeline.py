@@ -120,15 +120,22 @@ def _icon_stroke_widths(scale: float) -> tuple:
 # calculation involved at all, so this class of bug can't occur for
 # it, regardless of why the underlying SVG behaves oddly.
 #
-# "modern" was the ORIGINAL hypothesis — DISPROVEN by the next real
-# render's log: the specific icons reported as broken (sparkles,
-# thumbs down, battery low, medal, person) resolved from folder=tabler
-# and folder=phosphor, not modern at all; "modern" didn't appear
-# anywhere in that log. So this isn't a single-folder problem — kept
-# here in case modern icons turn out to have their own, separate
-# issue later, but it's not doing anything useful right now with an
-# empty set.
-FORCE_POP_ICON_FOLDERS = set()
+# "modern" was the ORIGINAL hypothesis — DISPROVEN by a real render's
+# log: the specific icons reported as broken (sparkles, thumbs down,
+# battery low, medal, person) resolved from folder=tabler and
+# folder=phosphor, not modern at all. As MORE broken icons kept
+# getting reported (megaphone, house, hammer, mask, shield), phosphor
+# became the dominant common factor — 7 of ~9 confirmed reports — so
+# per direct request this now bans the WHOLE folder from hand-drawing,
+# on every channel, not just psychology (psychology separately also
+# EXCLUDES phosphor from search entirely via
+# EXCLUDED_LIBRARIES_BY_CHANNEL in asset_resolver.py, so this set has
+# no effect there — it only actually does anything for OTHER channels,
+# which still search phosphor normally but now pop instead of
+# hand-draw whatever they get from it). None of the 4 call sites below
+# gate this check by channel, so adding a folder here is automatically
+# channel-agnostic — no other code needed to reach every channel.
+FORCE_POP_ICON_FOLDERS = {"phosphor"}
 
 # Per-concept_key force-pop list — the mechanism that's actually
 # earning its keep right now, since the bug doesn't correlate with any
