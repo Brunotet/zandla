@@ -68,10 +68,41 @@ def validate_beat(beat: dict, index: int) -> None:
             f"other, not both."
         )
 
-    if beat["mode"] in ("draw", "drag") and "concept_key" not in beat:
+    # NEW: 'photos' — a draw beat can carry a 2-4 entry photo sequence
+    # INSTEAD OF a concept_key (render_pipeline.py's history-channel
+    # "photos" feature — already implemented there, this file just
+    # never had the matching validation added, which is exactly what
+    # produced a real render failure: the n8n builder already allowed
+    # this shape, but this file still hard-required concept_key on
+    # every 'draw' beat with no exception, so a valid photos-only beat
+    # got rejected here even though render_pipeline.py knows how to
+    # render it. Mirrors the n8n builder's own has_photos/hasPhotos
+    # check exactly, so both validation layers agree on what's allowed.
+    has_photos = beat["mode"] == "draw" and bool(beat.get("photos"))
+
+    if beat["mode"] in ("draw", "drag") and "concept_key" not in beat and not has_photos:
         raise BeatValidationError(
             f"beat[{index}] (id={beat['beat_id']}) mode='{beat['mode']}' requires a concept_key"
+            + (", or a 'photos' list of 2-4 entries" if beat["mode"] == "draw" else "")
         )
+
+    if beat["mode"] == "draw" and "concept_key" in beat and has_photos:
+        raise BeatValidationError(
+            f"beat[{index}] (id={beat['beat_id']}) mode='draw' has BOTH concept_key and 'photos' — "
+            f"use one or the other, not both."
+        )
+
+    if has_photos:
+        photos = beat["photos"]
+        if not isinstance(photos, list) or len(photos) < 2 or len(photos) > 4:
+            raise BeatValidationError(
+                f"beat[{index}] (id={beat['beat_id']}) mode='draw' 'photos' needs 2-4 entries — got {photos!r}"
+            )
+        for p_idx, p in enumerate(photos):
+            if not str(p or "").strip():
+                raise BeatValidationError(
+                    f"beat[{index}] (id={beat['beat_id']}) photos[{p_idx}] is empty"
+                )
 
     if beat["mode"] == "icon_word" and not has_items and not has_icons:
         if "concept_key" not in beat:
