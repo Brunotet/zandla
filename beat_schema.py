@@ -141,6 +141,30 @@ def validate_beat(beat: dict, index: int) -> None:
                     f"beat[{index}] (id={beat['beat_id']}) icons[{i}] is empty"
                 )
 
+        # NEW: "icon_layout" picks between the default left/right "grid"
+        # (see _layout_icon_grid) and the "cluster" style — one icon
+        # hand-drawn center, the rest popping around it (see
+        # _layout_icon_cluster) — added per direct spec. Cheap early
+        # check here matches render_pipeline.py's own belt-and-suspenders
+        # check at render time, so a bad count fails fast in n8n
+        # instead of burning a full GitHub Actions run first.
+        icon_layout = beat.get("icon_layout")
+        if icon_layout is not None and icon_layout not in ("grid", "cluster"):
+            raise BeatValidationError(
+                f"beat[{index}] (id={beat['beat_id']}) 'icon_layout' must be 'grid' or 'cluster' "
+                f"(omit entirely for the default 'grid') — got {icon_layout!r}"
+            )
+        if icon_layout == "cluster" and len(icons) not in (3, 4):
+            raise BeatValidationError(
+                f"beat[{index}] (id={beat['beat_id']}) icon_layout='cluster' requires exactly 3 or 4 "
+                f"icons — got {len(icons)}"
+            )
+    elif beat.get("icon_layout") is not None:
+        raise BeatValidationError(
+            f"beat[{index}] (id={beat['beat_id']}) sets 'icon_layout' but has no 'icons' — "
+            f"'icon_layout' only applies to icon-only beats."
+        )
+
     # NEW, optional: "number" draws a big standalone digit (1, 2, 3...)
     # in its own row ABOVE the items rows — for a numbered listicle
     # sentence ("One, you...", "Two, you..."), this puts an actual "1"/
@@ -163,6 +187,28 @@ def validate_beat(beat: dict, index: int) -> None:
                 f"beat[{index}] (id={beat['beat_id']}) 'number' must be a positive integer (1, 2, 3, ...) — "
                 f"got {beat['number']!r}"
             )
+
+    # NEW, PSYCHOLOGY CHANNEL ONLY, per direct request: a single lone
+    # icon (mode='draw', or 'icon_word' with a single concept_key/label
+    # and no 'items'/'icons') can only represent a genuinely SHORT
+    # sentence — 4 words or fewer. A 5+ word sentence has too much
+    # content for one icon to adequately carry; it must use multiple
+    # icons instead ('items' or 'icons', 2+ pieces). This is a
+    # structural guard, not a style choice — it doesn't say WHICH
+    # multi-icon shape to use, just that a lone icon isn't enough here.
+    if beat.get("channel") == "psychology":
+        is_lone_icon = beat["mode"] == "draw" or (
+            beat["mode"] == "icon_word" and not has_items and not has_icons
+        )
+        if is_lone_icon:
+            word_count = len(beat.get("text", "").split())
+            if word_count >= 5:
+                raise BeatValidationError(
+                    f"beat[{index}] (id={beat['beat_id']}) is a lone single icon (mode={beat['mode']!r}) "
+                    f"for a {word_count}-word sentence — a single icon is only allowed for sentences of "
+                    f"4 words or fewer on this channel. Use 'items' (icon+word pieces) or 'icons' "
+                    f"(pure icons) with 2 or more entries instead."
+                )
 
     if not beat["text"].strip():
         raise BeatValidationError(f"beat[{index}] (id={beat['beat_id']}) has empty text")
