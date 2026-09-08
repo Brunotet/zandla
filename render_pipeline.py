@@ -1393,8 +1393,20 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
 
             illustration_items = []
             popped_icons = []
+            # Per direct request: allow ONE real photo to be mixed in
+            # among the icons in this field (history channel only —
+            # see beat_schema.py's matching validation, which caps this
+            # at exactly one photo entry per beat, "a single image per
+            # sentence"). Backward compatible: a plain string entry
+            # (the only shape that existed before) still means an icon,
+            # exactly as always.
             for i, concept_key_raw in enumerate(icons):
-                concept_key = (concept_key_raw or "").strip()
+                if isinstance(concept_key_raw, dict):
+                    concept_key = (concept_key_raw.get("concept_key") or "").strip()
+                    entry_asset_type = (concept_key_raw.get("asset_type") or "icon").strip().lower()
+                else:
+                    concept_key = (concept_key_raw or "").strip()
+                    entry_asset_type = "icon"
                 if not concept_key:
                     raise RuntimeError(f"beat_id={beat['beat_id']}: icons[{i}] is empty")
 
@@ -1404,6 +1416,44 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                     _fallback_base = number_end_t if (has_number and number_end_t is not None) else beat["start"]
                     icon_start_t = _fallback_base + i * per_icon_duration
                     icon_end_t = icon_start_t + min(0.9, per_icon_duration * 0.9)
+
+                if entry_asset_type == "photo":
+                    # A real photo mixed into this icons grid/cluster —
+                    # never hand-drawn (a photo can't be stroke-revealed),
+                    # always a pop-in, same illustration mechanism already
+                    # proven for "photos" sequences and photo-type
+                    # icon_word items. Resolves through the SAME real-photo
+                    # search (Commons/LOC/NASA/Internet Archive) as those —
+                    # this is a hard failure if nothing is found, same
+                    # "loud failure over silent fallback" rule as every
+                    # other photo lookup in this pipeline.
+                    photo_asset_entry = resolve_beat_asset(
+                        {"concept_key": concept_key, "beat_id": f"{beat['beat_id']}-icon{i}"},
+                        channel, illustration_cache_dir, asset_type="photo",
+                    )
+                    cached_path = (photo_asset_entry.get("asset_ref") or {}).get("cached_path")
+                    if not cached_path:
+                        raise RuntimeError(
+                            f"beat_id={beat['beat_id']}: icons[{i}] concept_key={concept_key!r} "
+                            f"asset_type='photo' found no real photo across Wikimedia Commons/LOC/NASA/"
+                            f"Internet Archive — cannot render this beat. Broaden the search phrase or "
+                            f"add a curated entry to channels/history/concept-library.json."
+                        )
+                    print(f"[render_pipeline] beat_id={beat['beat_id']} icon{i} concept_key={concept_key!r} "
+                          f"asset_type='photo' -> resolved: source={photo_asset_entry.get('asset_source')}")
+                    box = icon_boxes[i]
+                    _, reveal_style = _illustration_reveal(channel, "photo", box)
+                    illustration_items.append({
+                        "beat_id": f"{beat['beat_id']}-grid{i}-illus",
+                        "illustration_path": cached_path,
+                        "illustration_region": box,
+                        "illustration_start": icon_start_t,
+                        "illustration_end": icon_end_t,
+                        "illustration_reveal": reveal_style,
+                    })
+                    sound_cues.append({"file": "click.mp3", "start": icon_start_t, "duration": 0.4})
+                    continue  # this entry is fully handled — skip every icon-specific step below
+
                 # BUG FIXED (confirmed by direct report — click.mp3 and
                 # drawing.mp3 audibly overlapping on a pop event): this
                 # used to unconditionally queue drawing.mp3 for EVERY

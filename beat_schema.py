@@ -166,11 +166,48 @@ def validate_beat(beat: dict, index: int) -> None:
                 f"beat[{index}] (id={beat['beat_id']}) 'icons' must be a list of 1-4 concept_keys "
                 f"(pure icons, no word labels) — got {icons!r}"
             )
-        for i, ck in enumerate(icons):
-            if not str(ck or "").strip():
-                raise BeatValidationError(
-                    f"beat[{index}] (id={beat['beat_id']}) icons[{i}] is empty"
-                )
+        # NEW: an entry can now be a plain string (icon, unchanged
+        # meaning) OR a {"concept_key": ..., "asset_type": "photo"}
+        # object mixing ONE real photo in among the icons — per direct
+        # request, "a single image per sentence" mixed with icons.
+        # HISTORY_TYPE_CHANNELS must be kept in sync with
+        # render_pipeline.py's own HISTORICAL_CHANNELS — this file
+        # doesn't import that module, so it's re-declared locally here,
+        # same precedent as the psychology-only word-count guard below.
+        HISTORY_TYPE_CHANNELS = {"history"}
+        photo_entry_count = 0
+        for i, entry in enumerate(icons):
+            if isinstance(entry, dict):
+                entry_ck = str(entry.get("concept_key") or "").strip()
+                entry_asset_type = str(entry.get("asset_type") or "icon").strip().lower()
+                if entry_asset_type not in ("icon", "photo"):
+                    raise BeatValidationError(
+                        f"beat[{index}] (id={beat['beat_id']}) icons[{i}] has invalid asset_type "
+                        f"{entry_asset_type!r} — must be 'icon' or 'photo'"
+                    )
+                if not entry_ck:
+                    raise BeatValidationError(
+                        f"beat[{index}] (id={beat['beat_id']}) icons[{i}] is empty"
+                    )
+                if entry_asset_type == "photo":
+                    if beat.get("channel") not in HISTORY_TYPE_CHANNELS:
+                        raise BeatValidationError(
+                            f"beat[{index}] (id={beat['beat_id']}) icons[{i}] sets asset_type='photo' "
+                            f"but channel '{beat.get('channel')}' doesn't support mixing real photos "
+                            f"into an icons grid/cluster — only {sorted(HISTORY_TYPE_CHANNELS)} does."
+                        )
+                    photo_entry_count += 1
+            else:
+                if not str(entry or "").strip():
+                    raise BeatValidationError(
+                        f"beat[{index}] (id={beat['beat_id']}) icons[{i}] is empty"
+                    )
+        if photo_entry_count > 1:
+            raise BeatValidationError(
+                f"beat[{index}] (id={beat['beat_id']}) 'icons' has {photo_entry_count} photo entries — "
+                f"only ONE real photo may be mixed into a single icons grid/cluster ('a single image "
+                f"per sentence')."
+            )
 
         # NEW: "icon_layout" picks between the default left/right "grid"
         # (see _layout_icon_grid) and the "cluster" style — one icon
@@ -267,7 +304,13 @@ def validate_beats_against_vocabulary(beats: list, vocabulary: set) -> None:
                     f"beat[{i}] (id={beat['beat_id']}) items[{item_idx}] references unknown concept_key "
                     f"'{item_ck}' — not present in any concept-library.json. Add it before rendering."
                 )
-        for icon_idx, ck in enumerate(beat.get("icons") or []):
+        for icon_idx, entry in enumerate(beat.get("icons") or []):
+            if isinstance(entry, dict):
+                if str(entry.get("asset_type") or "icon").strip().lower() == "photo":
+                    continue  # a real photo search phrase, not a curated icon vocabulary entry
+                ck = entry.get("concept_key")
+            else:
+                ck = entry
             if ck and ck not in vocabulary:
                 raise BeatValidationError(
                     f"beat[{i}] (id={beat['beat_id']}) icons[{icon_idx}] references unknown concept_key "
