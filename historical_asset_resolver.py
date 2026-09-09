@@ -172,6 +172,24 @@ def has_image_coverage(query: str) -> bool:
 # ══════════════════════════════════════════════════════════════════
 # Library of Congress — Prints & Photographs
 # ══════════════════════════════════════════════════════════════════
+def _extract_image_url(value) -> Optional[str]:
+    """LOC's search API hands back the SAME field (image/thumb_large/
+    thumb) as a plain URL string for most items, but as a dict of size
+    variants for others — {'alt': 'digitized item thumbnail', 'full':
+    ..., 'square': ..., 'thumb': ...}. This is what _fetch_loc's field
+    values actually look like on the wire; unwrap either shape into a
+    real URL string, preferring the highest-quality variant available.
+    Returns None if nothing usable is found (caller treats that the
+    same as a missing field, tries the next key)."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for k in ("full", "thumb_large", "thumb", "square"):
+            if value.get(k):
+                return value[k]
+    return None
+
+
 def _fetch_loc(query: str) -> list:
     """loc.gov/pictures search API. LOC's Prints & Photographs division
     marks rights status per item (rights_advisory / access_advisory
@@ -195,11 +213,23 @@ def _fetch_loc(query: str) -> list:
         if "restricted" in rights or "copyright" in rights:
             continue
 
+        # CONFIRMED BUG, FIXED HERE: LOC's search API is inconsistent
+        # about the shape of these fields — for MOST items they're a
+        # plain URL string, but for some, the same field is instead a
+        # dict of size variants: {'alt': ..., 'full': ..., 'square':
+        # ..., 'thumb': ...}. The old code only checked truthiness and
+        # handed whatever was there straight to _download_image(),
+        # which calls requests.get() on it — passing the whole dict
+        # produced exactly the "No connection adapters were found for
+        # {...}" failures seen in real render logs, silently discarding
+        # what could have been a perfectly good candidate every time it
+        # happened. _extract_image_url() below unwraps either shape.
         img_url = None
         for key in ("image", "thumb_large", "thumb"):
             if item.get(key):
-                img_url = item[key]
-                break
+                img_url = _extract_image_url(item[key])
+                if img_url:
+                    break
         if not img_url:
             continue
         img_bytes = _download_image(img_url)
@@ -294,7 +324,7 @@ def _fetch_internet_archive(query: str) -> list:
 # ══════════════════════════════════════════════════════════════════
 # Public entrypoint
 # ══════════════════════════════════════════════════════════════════
-_TRAILING_YEAR_RE = re.compile(r"\s*\b(1[5-9]\d{2}|20\d{2})\b\s*$")
+_TRAILING_YEAR_RE = re.compile(r"\s*\b(1[5-9]\d{2}|20\d{2})s?\b\s*$")
 
 
 def _broadened_queries(query: str) -> list:
