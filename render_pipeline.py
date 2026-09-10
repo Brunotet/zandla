@@ -201,10 +201,34 @@ def _pop_icon_dict(icon_path_info: dict, beat_id: str, box: dict, start_t: float
         "end": end_t,
     }
 ROW_CONTENT_H = 230  # compact, FIXED row height for multi-row icon_word "items" — NOT
-                      # stretched to fill the (intentionally oversized, for bleed-prevention)
-                      # allocated region. That stretch was the actual root cause of "rows too
-                      # far apart": each row became much taller than its content needed, with
-                      # icon+word centered in mostly-dead space.
+# CHANNEL-SPECIFIC OVERRIDE, added per direct report (history channel
+# only): a 2-row items beat at ROW_CONTENT_H=230 produces a raw content
+# box whose aspect ratio is far from portrait's target aspect (0.5625),
+# so the camera has to zoom out much further than the content itself
+# needs just to fix that aspect ratio — traced numerically: the content
+# ended up filling only ~50% of the actual camera frame height for a
+# 2-row beat. That's what read as "icons/photos too small" AND "the two
+# rows look too far apart" at the same time — both are really the same
+# symptom (everything shown at roughly half its intended on-screen
+# size) since the camera is framing a much wider view than the tightly-
+# packed rows actually require. Raising the per-row height for history
+# specifically brings that same 2-row box's aspect ratio much closer to
+# portrait's target, so far less "wasted" zoom-out is needed and content
+# actually fills ~85-90% of the frame instead of ~50-75%.
+# PSYCHOLOGY IS DELIBERATELY LEFT AT THE ORIGINAL 230 — that channel's
+# icon stroke widths, hand sizes, and pop timing have all been tuned
+# against this exact value across many rounds; changing the shared
+# constant would have reopened every one of those without anyone
+# reporting a problem with psychology's current row sizing.
+ROW_CONTENT_H_BY_CHANNEL = {
+    "history": 400,
+}
+
+
+def _row_content_h(channel: str) -> float:
+    return ROW_CONTENT_H_BY_CHANNEL.get(channel, ROW_CONTENT_H)
+
+
 ROW_GAP_FIXED = 16   # small fixed gap between rows, not a percentage of region height.
                       # BOTH of these must be module-level, not local to one function — they're
                       # used by _layout_board() AND build_scene_program(), two separate
@@ -706,7 +730,7 @@ def resolve_icon_stroke_path(concept_key: str, channel: str, illustration_cache_
 # ══════════════════════════════════════════════════════════════════
 # World-space layout
 # ══════════════════════════════════════════════════════════════════
-def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
+def _layout_board(beats: List[dict], channel: str, orientation: str = "landscape") -> dict:
     """Simple left-to-right, wrapping flow layout: each draw/write beat
     gets a slot on the world-space board in script order. This is
     intentionally the simplest thing that works — deterministic,
@@ -767,7 +791,7 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
     # ordinary single-row case, bleeding into the row below — same
     # class of bug as the column one above, triggered by height instead
     # of width.
-    _tall_content_h = ROW_CONTENT_H * MAX_ROWS_WITH_NUMBER + ROW_GAP_FIXED * (MAX_ROWS_WITH_NUMBER - 1)
+    _tall_content_h = _row_content_h(channel) * MAX_ROWS_WITH_NUMBER + ROW_GAP_FIXED * (MAX_ROWS_WITH_NUMBER - 1)
     _tall_fitted = _fit_aspect(region_for_bbox({"x": 0, "y": 0, "w": CONTENT_W, "h": _tall_content_h}, padding=60), target_aspect)
     SLOT_H = max(400, _tall_fitted["h"] + SAFETY_MARGIN)
 
@@ -831,7 +855,7 @@ def _layout_board(beats: List[dict], orientation: str = "landscape") -> dict:
         # stays correct either way.
         chunk_rows = max(_row_count_for_beat(b) for b in chunk)
         full_w = CONTENT_W
-        full_h = ROW_CONTENT_H * chunk_rows + ROW_GAP_FIXED * (chunk_rows - 1) if chunk_rows > 1 else CONTENT_H
+        full_h = _row_content_h(channel) * chunk_rows + ROW_GAP_FIXED * (chunk_rows - 1) if chunk_rows > 1 else CONTENT_H
 
         items = chunk[:MAX_ITEMS_PER_SLOT]
         n = len(items)
@@ -1037,7 +1061,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
 
     frame = get_frame_dims(orientation)
     board = get_board_dims(orientation)
-    board_layout = _layout_board(timed_beats, orientation=orientation)
+    board_layout = _layout_board(timed_beats, channel, orientation=orientation)
 
     # Start the camera ALREADY FRAMED on the first beat's region rather
     # than the full board — a slow zoom-in ramp from a wide default view
@@ -1300,7 +1324,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
                 )
 
             row_gap = ROW_GAP_FIXED
-            row_h = ROW_CONTENT_H
+            row_h = _row_content_h(channel)
 
             beat_number = beat.get("number")
             has_number = beat_number is not None
@@ -1608,7 +1632,7 @@ def build_scene_program(script_text: str, beats: List[dict], channel: str,
 
             n_rows = len(pairs)
             row_gap = ROW_GAP_FIXED
-            row_h = ROW_CONTENT_H
+            row_h = _row_content_h(channel)
 
             # NEW: same "layout" idea as the single icon_word beat below —
             # optional, defaults to the original side-by-side split per row
