@@ -37,31 +37,6 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
-      # ── CACHING, added to cut down the "Install dependencies" step ──
-      # (was taking ~20 minutes on every single run). setup-python's
-      # cache:"pip" above already caches pip's own download cache keyed
-      # on requirements.txt — that part was already working. The two
-      # things that were NOT cached, and are almost certainly the real
-      # cost here: (1) Playwright's Chromium browser binary, which
-      # `playwright install --with-deps chromium` re-downloads from
-      # scratch every run regardless of pip cache, and (2) the .deb
-      # packages apt-get fetches for ffmpeg and Playwright's OS-level
-      # dependencies (libnss3, libatk, etc. — bundled into --with-deps).
-      # Both are cached below with straightforward, standard
-      # actions/cache patterns. NEITHER cache being empty (first run
-      # after this change, or a Playwright/requirements.txt version
-      # bump) breaks anything — cache-miss just falls through to the
-      # exact same full install this workflow already did before.
-      - name: Cache Playwright browser binaries
-        id: playwright-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          # Keyed on requirements.txt's hash since that's where the
-          # playwright package (and therefore its matching browser
-          # build) version is pinned — a version bump there naturally
-          # invalidates this key and downloads the new matching browser.
-          key: playwright-browsers-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
       - name: Cache apt packages (ffmpeg + Playwright OS deps)
         uses: actions/cache@v4
         with:
@@ -79,6 +54,49 @@ jobs:
         run: |
           sudo apt-get update -y && sudo apt-get install -y ffmpeg
           pip install -r requirements.txt
+      # ── CONFIRMED BUG, FIXED HERE (now belt-and-suspenders) ─────────
+      # requirements.txt originally pinned "playwright" with NO
+      # version — so `pip install` could silently resolve a NEWER
+      # Playwright release on any given run without requirements.txt's
+      # own text (and therefore its hash) ever changing. The old
+      # browser-binary cache below was keyed on
+      # hashFiles('requirements.txt') and decided BEFORE this install
+      # step even ran — so it had no way to know the actually-resolved
+      # Playwright version, and a real render failed with "Executable
+      # doesn't exist... chromium_headless_shell-1243" because the
+      # cache reported a "hit" against an OLDER cached browser build
+      # that didn't match the NEWER Playwright version pip had just
+      # silently picked up.
+      # requirements.txt now pins playwright to an exact version
+      # (==1.63.0), which is the PRIMARY fix — a real render's
+      # Playwright version can no longer drift between runs at all.
+      # The steps below (capturing the real installed version and
+      # keying the browser cache on it, rather than on
+      # requirements.txt's hash) are kept as a SECOND layer of
+      # protection: if that pin is ever bumped, forgotten, or removed
+      # later, this still self-heals instead of silently repeating the
+      # exact same failure.
+      - name: Resolve installed Playwright version
+        id: pw-version
+        run: |
+          PW_VERSION=$(pip show playwright | grep -i '^Version:' | awk '{print $2}')
+          if [ -z "$PW_VERSION" ]; then
+            echo "Could not determine installed Playwright version from 'pip show playwright'" >&2
+            exit 1
+          fi
+          echo "Resolved Playwright version: $PW_VERSION"
+          echo "version=$PW_VERSION" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright browser binaries
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          # Keyed on the ACTUAL resolved Playwright version (see
+          # above), not requirements.txt's hash — a version bump,
+          # silent or pinned, now always produces a fresh cache key
+          # and a fresh matching browser download instead of a stale
+          # "hit" against the wrong build.
+          key: playwright-browsers-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
       - name: Install Playwright Chromium (full download)
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: playwright install --with-deps chromium
